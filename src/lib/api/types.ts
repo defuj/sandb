@@ -113,6 +113,12 @@ export interface QueryRun {
   elapsedMs: number;
 }
 
+/** Live statement progress of a running query. */
+export interface QueryProgress {
+  done: number;
+  total: number;
+}
+
 export interface ExportResult {
   /** The user closed the save dialog; nothing was written. */
   cancelled: boolean;
@@ -246,6 +252,8 @@ export interface Backend {
   /** Runs every statement in `sql` on one connection; fails with code `cancelled` after `cancelQuery`. */
   runQuery(request: RunRequest): Promise<QueryRun>;
   cancelQuery(queryId: string): Promise<void>;
+  /** `done`/`total` while the run is in progress; `null` for an unknown or finished id. */
+  queryProgress(queryId: string): Promise<QueryProgress | null>;
   /** Commits the tab's open transaction. Fails with `not_found` when the tab has no session. */
   commitTransaction(tabId: string): Promise<void>;
   /** Rolls back the tab's open transaction; the session stays open. */
@@ -258,6 +266,10 @@ export interface Backend {
   quitApp(): Promise<void>;
   /** Tauri only: asks for a file in a native save dialog and streams the full result of one read to it. Other transports export in the browser. `tabId` reads inside the tab's open transaction, as `runQuery` does. */
   exportCsv(connId: string, database: string, sql: string, tabId?: string): Promise<ExportResult>;
+  /** `CREATE` statement(s) of one table or view: the table, then its indexes (and triggers on SQLite). */
+  tableDdl(connId: string, database: string, schema: string | null, table: string): Promise<string>;
+  /** Tauri only: asks for a file in a native save dialog and writes the table's DDL to it; with `data`, INSERT statements for every row follow. */
+  exportTableSql(connId: string, database: string, schema: string | null, table: string, data: boolean): Promise<ExportResult>;
   /** Checks SQL against the AI read guard without running it. */
   guardCheck(engine: Engine, sql: string): Promise<GuardCheck>;
   /** Describes a proposed write for the approval preview. Never runs it. */

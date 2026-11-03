@@ -4,9 +4,10 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::core::connections::{self, Connection, ConnectionInput, Engine, TestResult};
+use crate::core::db::dump::{self, TableExportRequest};
 use crate::core::db::export::{self, ExportRequest, ExportResult};
 use crate::core::db::introspect::{self, ColumnInfo, SchemaSnapshot, TableInfo};
-use crate::core::db::query::{self, QueryRun, RunRequest};
+use crate::core::db::query::{self, QueryProgress, QueryRun, RunRequest};
 use crate::core::db::readonly::{self, AiReadResult, ReadLimits};
 use crate::core::db::session::{self, TabStatus};
 use crate::core::error::AppError;
@@ -99,6 +100,18 @@ pub async fn list_columns(
     introspect::list_columns(&state, &conn_id, &database, schema.as_deref(), &table).await
 }
 
+/// CREATE statements of one table or view (with its indexes, and triggers on SQLite).
+#[tauri::command]
+pub async fn table_ddl(
+    state: State<'_, AppState>,
+    conn_id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+) -> Res<String> {
+    dump::table_ddl(&state, &conn_id, &database, schema.as_deref(), &table).await
+}
+
 #[tauri::command]
 pub async fn schema_snapshot(
     state: State<'_, AppState>,
@@ -116,6 +129,15 @@ pub async fn run_query(state: State<'_, AppState>, request: RunRequest) -> Res<Q
 #[tauri::command]
 pub async fn cancel_query(state: State<'_, AppState>, query_id: String) -> Res<()> {
     query::cancel(&state, &query_id).await
+}
+
+/// Live statement progress of a running query (`done` of `total`); `null` once it ends.
+#[tauri::command]
+pub async fn query_progress(
+    state: State<'_, AppState>,
+    query_id: String,
+) -> Res<Option<QueryProgress>> {
+    Ok(query::progress(&state, &query_id))
 }
 
 /// Commits the tab's open transaction. The session closes; the next run opens a new one.
@@ -210,4 +232,35 @@ pub async fn export_csv(
         .into_path()
         .map_err(|e| AppError::invalid("Choose a file to export to").with_detail(e.to_string()))?;
     export::export_csv(&state, request, &path).await
+}
+
+/// One table as a `.sql` file: its DDL, plus INSERT statements when `request.data`. The file
+/// comes from a native save dialog, as for `export_csv`.
+#[tauri::command]
+pub async fn export_table_sql(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: TableExportRequest,
+) -> Res<ExportResult> {
+    connections::get(&state, &request.conn_id)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(format!("{}.sql", request.table))
+        .add_filter("SQL", &["sql"])
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let picked = rx.await.ok().flatten();
+    let Some(path) = picked else {
+        return Ok(ExportResult {
+            cancelled: true,
+            rows: 0,
+            path: String::new(),
+        });
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| AppError::invalid("Choose a file to export to").with_detail(e.to_string()))?;
+    dump::export_table_sql(&state, request, &path).await
 }

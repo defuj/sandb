@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, CircleArrowUp } from '@lucide/svelte';
-  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2 } from '@lucide/svelte';
+  import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, CircleArrowUp, PanelBottom } from '@lucide/svelte';
+  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste } from '@lucide/svelte';
   import { tick, untrack } from 'svelte';
   import { ui, db, toggleTheme, active, type Conn } from './lib/state.svelte';
   import { api, ApiError } from './lib/api';
@@ -18,6 +18,8 @@
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import DeleteConnectionDialog from './lib/components/DeleteConnectionDialog.svelte';
   import TargetBar from './lib/components/TargetBar.svelte';
+  import TableDangerDialog from './lib/components/TableDangerDialog.svelte';
+  import { qualified, displayName, selectSql, insertSql, dangerSql, type TableAction, type TableRef, type Danger } from './lib/tableActions';
   import { logQuery } from './lib/audit.svelte';
   import { chat } from './lib/chat.svelte';
   import { confirmDiscard, resetEdits } from './lib/edits.svelte';
@@ -48,7 +50,7 @@
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         e.stopPropagation();
-        if (connDialog || connDelete || guardTarget || chat.pending || txPrompt.ask) return;
+        if (connDialog || connDelete || danger || guardTarget || chat.pending || txPrompt.ask) return;
         paletteOpen = !paletteOpen;
       }
     };
@@ -60,6 +62,44 @@
     ui.page = 'query';
     await tick();
     editor?.focus();
+  }
+
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  let mainEl = $state<HTMLElement>();
+
+  // Pointer capture keeps the moves coming after the pointer leaves the thin handle.
+  function drag(e: PointerEvent, move: (dx: number, dy: number) => void) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const [x, y] = [e.clientX, e.clientY];
+    el.setPointerCapture(e.pointerId);
+    el.onpointermove = (m) => move(m.clientX - x, m.clientY - y);
+    el.onlostpointercapture = () => (el.onpointermove = el.onlostpointercapture = null);
+  }
+
+  const setSidebar = (w: number) => (ui.sidebarWidth = Math.round(clamp(w, 160, 480)));
+  const setSplit = (px: number) => mainEl && (ui.editorSplit = clamp(px / mainEl.clientHeight, 0.1, 0.8));
+
+  function resizeSidebar(e: PointerEvent) {
+    const w = ui.sidebarWidth;
+    drag(e, (dx) => setSidebar(w + dx));
+  }
+
+  function resizeEditor(e: PointerEvent) {
+    const h = ui.editorSplit * (mainEl?.clientHeight ?? 0);
+    drag(e, (_, dy) => setSplit(h + dy));
+  }
+
+  // Arrow keys move a focused splitter by 16 px.
+  function keySidebar(e: KeyboardEvent) {
+    const d = { ArrowLeft: -16, ArrowRight: 16 }[e.key];
+    if (d) { e.preventDefault(); setSidebar(ui.sidebarWidth + d); }
+  }
+
+  function keyEditor(e: KeyboardEvent) {
+    const d = { ArrowUp: -16, ArrowDown: 16 }[e.key];
+    if (d && mainEl) { e.preventDefault(); setSplit(ui.editorSplit * mainEl.clientHeight + d); }
   }
 
   async function switchConn(c: Conn) {
@@ -168,7 +208,8 @@
 
   const DEFAULT_LIMIT = 200;
   // Keyed by tab id; the Run/Cancel button and timer show the active tab's run only.
-  const running = $state<Record<string, { id: string; started: number }>>({});
+  // `script`: a file run; `done`/`total` come from the backend while it runs.
+  const running = $state<Record<string, { id: string; started: number; script?: { name: string; done: number; total: number } }>>({});
   const busy = $derived(running[tab.id]);
   let now = $state(Date.now());
   $effect(() => {
@@ -177,12 +218,15 @@
     return () => clearInterval(t);
   });
 
-  /** Runs the selection, or the whole editor. `again` re-runs the shown result with a higher limit. */
-  async function run(again?: { sql: string; limit: number }) {
+  /**
+   * Runs the selection, or the whole editor. `again` re-runs the shown result with a higher limit.
+   * `pick` runs the given SQL instead; with `script` (a file name) the toolbar shows statement progress.
+   */
+  async function run(again?: { sql: string; limit: number }, pick?: { sql: string; script?: string }) {
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
     if (running[t.id] || (!again && !confirmDiscard())) return;
-    const sql = again?.sql ?? (editor?.selection().trim() || t.query);
+    const sql = again?.sql ?? pick?.sql ?? (editor?.selection().trim() || t.query);
     const k = statementKind(sql);
     if (k === 'empty') return;
     const c = conn;
@@ -190,8 +234,19 @@
     const limit = again?.limit ?? DEFAULT_LIMIT;
     const id = crypto.randomUUID();
     const started = Date.now();
-    running[t.id] = { id, started };
+    running[t.id] = { id, started, script: pick?.script ? { name: pick.script, done: 0, total: 0 } : undefined };
     now = started;
+    // A run should show its result, so it opens a hidden grid.
+    ui.resultsOpen = true;
+    // Polls until the run ends; a poll that fails only leaves the count where it was.
+    const poll = pick?.script
+      ? setInterval(() => {
+          api.queryProgress(id).then((p) => {
+            const s = running[t.id]?.id === id ? running[t.id].script : undefined;
+            if (p && s) [s.done, s.total] = [p.done, p.total];
+          }, () => {});
+        }, 300)
+      : undefined;
     let r: QueryResult;
     try {
       r = toResult(await api.runQuery({ connId: c.id, database: dbName, sql, queryId: id, limit, tabId: t.id }), isMock, limit, dbName);
@@ -199,6 +254,7 @@
       const err = ApiError.from(e);
       r = { columns: [], rows: [], ms: Date.now() - started, error: err.code === 'cancelled' ? 'Query cancelled' : err.message, live: !isMock };
     } finally {
+      clearInterval(poll);
       delete running[t.id];
       refreshStatus(t);
     }
@@ -216,6 +272,38 @@
 
   function cancel() {
     if (busy) api.cancelQuery(busy.id).catch(() => {});
+  }
+
+  // Editor context menu. It replaces the native menu, so it carries Cut / Copy / Paste too.
+  let editorMenu = $state<{ x: number; y: number; sel: boolean } | null>(null);
+  let scriptInput = $state<HTMLInputElement>();
+
+  function openEditorMenu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    editor?.pointAt(e.clientX, e.clientY);
+    // Menu is w-56 (224px) and about 240px tall; keep it inside the window.
+    editorMenu = { x: Math.max(4, Math.min(e.clientX, innerWidth - 228)), y: Math.max(4, Math.min(e.clientY, innerHeight - 244)), sel: !!editor?.selection() };
+  }
+
+  // The action runs first: the menu's `{@const}` reads `editorMenu`, which is null once closed.
+  function menuAct(fn: () => void) {
+    fn();
+    editorMenu = null;
+  }
+
+  function copySelection(cut: boolean) {
+    const s = editor?.selection();
+    if (!s) return;
+    navigator.clipboard?.writeText(s).catch(() => {});
+    if (cut) editor?.insert('');
+  }
+
+  // The file runs as one run, like Run all: one connection, statements in order, stop at the first error.
+  async function runScript(e: Event & { currentTarget: HTMLInputElement }) {
+    const f = e.currentTarget.files?.[0];
+    e.currentTarget.value = ''; // so picking the same file again fires change
+    if (f) run(undefined, { sql: await f.text(), script: f.name });
   }
 
   // Error of the last Commit/Rollback button press, shown on its tab only.
@@ -366,12 +454,92 @@
     tab.query = `SELECT *\nFROM ${from};`;
     tab.opened = { key: `${conn.id}/${dbName}/${schemaName ?? ''}/${table}`, sql: tab.query.replace(/;\s*$/, '') };
     run();
+  }
+
+  // ---- table menu of the connection tree ----
+  let tree = $state<ReturnType<typeof ConnectionTree>>();
+  let danger = $state<Danger | null>(null);
+  // Outcome of a table action that has no other place to show it (count, export, an error).
+  let notice = $state<{ ok: boolean; text: string } | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function notify(ok: boolean, text: string) {
+    notice = { ok, text };
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), ok ? 5000 : 10000);
+  }
+
+  /** Generated SQL opens in a new tab on the table's connection and database; nothing runs. */
+  function openInNewTab(c: Conn, t: TableRef, sql: string) {
+    if (!confirmDiscard()) return;
+    const nt = newTab(sql);
+    setTabConn(nt, c);
+    if (c.engine !== 'sqlite') nt.database = t.database;
+    ui.page = 'query';
+  }
+
+  async function tableAction(a: TableAction, c: Conn, t: TableRef) {
+    const e = c.engine;
+    try {
+      switch (a) {
+        case 'view':
+          return openTableIn(c, t.name, isMock ? undefined : { database: t.database, schema: t.schema });
+        case 'ddl':
+          return openInNewTab(c, t, await api.tableDdl(c.id, t.database, t.schema, t.name));
+        case 'select':
+        case 'insert': {
+          const cols = await api.listColumns(c.id, t.database, t.schema, t.name);
+          return openInNewTab(c, t, a === 'select' ? selectSql(e, t, cols) : insertSql(e, t, cols));
+        }
+        case 'count': {
+          const sql = `SELECT count(*) FROM ${qualified(e, t)}`;
+          const started = Date.now();
+          // No tabId: a read through the pool, outside any tab transaction.
+          const r = await api.runQuery({ connId: c.id, database: t.database, sql, queryId: crypto.randomUUID(), limit: 1 });
+          logQuery({ kind: 'READ', source: 'You', sql, result: { status: 'ok', rows: 1 }, ms: Date.now() - started, conn: c });
+          const n = Number(r.statements[0]?.rows[0]?.[0]);
+          return notify(true, `${displayName(t)}: ${Number.isFinite(n) ? n.toLocaleString() : '?'} rows`);
+        }
+        case 'exportDdl':
+        case 'exportSql': {
+          const out = await api.exportTableSql(c.id, t.database, t.schema, t.name, a === 'exportSql');
+          if (!out.cancelled) notify(true, a === 'exportSql' && t.kind === 'table' ? `Exported the DDL and ${out.rows} rows to ${out.path}` : `Exported the DDL to ${out.path}`);
+          return;
+        }
+        case 'exportCsv': {
+          const out = await api.exportCsv(c.id, t.database, `SELECT * FROM ${qualified(e, t)}`);
+          if (!out.cancelled) notify(true, `Exported ${out.rows} rows to ${out.path}`);
+          return;
+        }
+        case 'truncate':
+        case 'drop':
+          danger = { action: a, c, t };
+      }
+    } catch (err) {
+      notify(false, ApiError.from(err).message);
+    }
+  }
+
+  // Runs through the pool without a tabId, so it commits at once, also on Production (the dialog asks first).
+  // Throws on a backend error; the dialog shows it and stays open.
+  async function runDanger(d: Danger) {
+    const sql = dangerSql(d.c.engine, d.t, d.action);
+    const started = Date.now();
+    try {
+      const r = await api.runQuery({ connId: d.c.id, database: d.t.database, sql, queryId: crypto.randomUUID(), limit: 1 });
+      logQuery({ kind: 'WRITE', source: 'You', sql, result: { status: 'ok', rows: r.statements[0]?.affected ?? 0 }, ms: Date.now() - started, conn: d.c });
+    } catch (err) {
+      logQuery({ kind: 'WRITE', source: 'You', sql, result: { status: 'error', message: ApiError.from(err).message }, ms: Date.now() - started, conn: d.c });
+      throw err;
+    }
+    danger = null;
+    tree?.refreshTables(d.c, d.t);
+    notify(true, `${d.action === 'drop' ? 'Dropped' : 'Truncated'} ${displayName(d.t)}`);
   }</script>
 
 <div class="flex h-full flex-col">
   <!-- Title bar. data-tauri-drag-region acts on the element itself only, so the empty strips drag the window and the buttons stay clickable. -->
   <div class="flex h-10 shrink-0 items-center px-2 select-none" data-tauri-drag-region>
-    <div class="flex h-full w-56 shrink-0 items-center gap-2 xl:w-60 {inset ? 'pl-[76px]' : 'pl-2.5'}" data-tauri-drag-region>
+    <div class="flex h-full shrink-0 items-center gap-2 {inset ? 'pl-[76px]' : 'pl-2.5'}" style:width="{ui.sidebarWidth}px" data-tauri-drag-region>
       <Database size={14} strokeWidth={2.25} class="shrink-0 text-accent" />
       <span class="text-[13px] font-semibold tracking-[-0.01em]" data-tauri-drag-region>sandb</span>
     </div>
@@ -407,7 +575,7 @@
 
   <div class="relative flex min-h-0 flex-1 gap-2 px-2 pb-2">
   <!-- Sidebar: sits on the canvas, so it reads as one piece with the title bar. -->
-  <aside class="flex w-56 shrink-0 flex-col overflow-hidden xl:w-60">
+  <aside class="flex shrink-0 flex-col overflow-hidden" style:width="{ui.sidebarWidth}px">
     <div class="pt-1 pb-2">
       <button class="flex h-7 w-full items-center gap-2 rounded-md bg-hover px-2.5 text-muted hover:bg-active hover:text-ink" onclick={() => (paletteOpen = true)}>
         <Search size={13} /> <span class="flex-1 text-left">Quick search</span>
@@ -416,7 +584,7 @@
     </div>
 
     <nav class="-mx-1 flex-1 overflow-auto px-1 pb-2">
-      <ConnectionTree {selected} onopen={openTableIn} onnew={newConnection} onedit={editConnection} onduplicate={duplicateConnection} ondelete={(c) => (connDelete = c)} />
+      <ConnectionTree bind:this={tree} {selected} onopen={openTableIn} onnew={newConnection} onedit={editConnection} onduplicate={duplicateConnection} ondelete={(c) => (connDelete = c)} ontable={tableAction} />
     </nav>
 
     <div class="flex items-center gap-0.5 pt-1">
@@ -428,8 +596,13 @@
     </div>
   </aside>
 
+  <!-- Fills the gap between the sidebar and the card: the negative margins cancel its share of the flex gap.
+       A focusable separator is the ARIA window-splitter pattern; Svelte counts every separator as static. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div class="-mx-2 w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuenow={ui.sidebarWidth} aria-valuemin={160} aria-valuemax={480} tabindex="0" onpointerdown={resizeSidebar} onkeydown={keySidebar}></div>
+
   <!-- Main -->
-  <main class="card flex min-w-[300px] flex-1 flex-col overflow-hidden">
+  <main bind:this={mainEl} class="card flex min-w-[300px] flex-1 flex-col overflow-hidden">
     {#if ui.page === 'settings'}
       <SettingsPage onEnableWrites={(c) => (guardTarget = c)} />
     {:else if ui.page === 'audit'}
@@ -470,6 +643,17 @@
       <!-- With the chat already open this only repeats it, so narrow toolbars drop it. -->
       <button class="btn btn-ghost shrink-0 px-2 2xl:px-2.5 {ui.chatOpen ? 'hidden lg:inline-flex' : ''}" onclick={() => (ui.chatOpen = true)} title="Explain with AI"><Sparkles size={14} /> <span class="hidden 2xl:inline">Explain with AI</span></button>
       {#if busy}
+        {#if busy.script}
+          {@const s = busy.script}
+          <!-- Total is 0 until the first poll answers. -->
+          <span class="flex min-w-0 items-center gap-2 text-[12px] text-muted" role="status" title="Running {s.name}">
+            <span class="max-w-40 truncate">{s.name}</span>
+            <span class="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-hover" role="progressbar" aria-label="Script progress" aria-valuenow={s.done} aria-valuemin={0} aria-valuemax={s.total || undefined}>
+              <span class="block h-full rounded-full bg-accent transition-[width]" style:width="{s.total ? (s.done / s.total) * 100 : 0}%"></span>
+            </span>
+            <span class="shrink-0 font-mono text-[11.5px] tabular-nums">{s.total ? `${s.done}/${s.total}` : '…'}</span>
+          </span>
+        {/if}
         <span class="font-mono text-[11.5px] text-muted tabular-nums">{((now - busy.started) / 1000).toFixed(1)} s</span>
         <button class="btn btn-secondary" onclick={cancel} title="Cancel the running query"><Square size={11} class="fill-current" /> Cancel</button>
       {:else}
@@ -477,16 +661,34 @@
       {/if}
     </div>
 
-    <div class="h-[34%] min-h-28 overflow-hidden">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
         <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} dialect={conn.engine} />
       {/key}
     </div>
+    <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />
 
-    <div class="min-h-0 flex-1 border-t border-line">
-      <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+    <!-- Hidden, not unmounted, so the grid keeps its scroll, selection and edit mode. -->
+    <div class="contents" hidden={!ui.resultsOpen}>
+      <!-- Overlaps the editor and grid by 4 px each, so the grab area is wider than the border line. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div class="relative z-10 -my-1 h-2 shrink-0 cursor-row-resize outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="horizontal" aria-label="Resize editor" aria-valuenow={Math.round(ui.editorSplit * 100)} aria-valuemin={10} aria-valuemax={80} tabindex="0" onpointerdown={resizeEditor} onkeydown={keyEditor}></div>
+
+      <div class="relative min-h-0 flex-1 border-t border-line">
+        <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+        <!-- Sits over the right end of the grid's header row; the surface fill keeps it clear of header text under it. -->
+        <button class="absolute top-1 right-1.5 z-20 grid size-6 place-items-center rounded-md bg-surface text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={14} /></button>
+      </div>
     </div>
+
+    <footer class="flex h-8 shrink-0 items-center gap-2 border-t border-line px-2 text-[12px] text-muted">
+      <button class="btn h-6 px-2 text-[12px] {ui.resultsOpen ? 'bg-hover text-ink' : 'btn-ghost'}" aria-pressed={ui.resultsOpen} title={ui.resultsOpen ? 'Hide results' : 'Show results'} onclick={() => (ui.resultsOpen = !ui.resultsOpen)}><PanelBottom size={13} /> Results</button>
+      {#if !ui.resultsOpen && tab.result}
+        <span class="text-faint tabular-nums">{tab.result.rows.length}{tab.result.truncated ? '+' : ''} rows · {tab.result.ms} ms</span>
+      {/if}
+    </footer>
     {/if}
   </main>
 
@@ -495,9 +697,31 @@
   {/if}
   </div>
 </div>
+<svelte:window onclick={() => (editorMenu = null)} oncontextmenu={() => (editorMenu = null)} onkeydown={(e) => { if (e.key === 'Escape') editorMenu = null; }} />
+{#if editorMenu}
+  {@const m = editorMenu}
+  <div class="popover fixed z-40 w-56 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => run(undefined, { sql: m.sel ? editor!.selection() : editor!.statementAt() }))}><Play size={13} /> {m.sel ? 'Run selection' : 'Run statement at cursor'}</button>
+    <button class="nav-item" role="menuitem" disabled={!!busy || kind === 'empty'} onclick={() => menuAct(() => run(undefined, { sql: tab.query }))}><ListOrdered size={13} /> Run all statements</button>
+    <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => scriptInput?.click())}><FileUp size={13} /> Run SQL script from file…</button>
+    <div class="mx-2 my-1 h-px bg-line"></div>
+    <button class="nav-item" role="menuitem" disabled={!m.sel} onclick={() => menuAct(() => copySelection(true))}><Scissors size={13} /> Cut</button>
+    <button class="nav-item" role="menuitem" disabled={!m.sel} onclick={() => menuAct(() => copySelection(false))}><Copy size={13} /> Copy</button>
+    <button class="nav-item" role="menuitem" onclick={() => menuAct(() => navigator.clipboard?.readText().then((s) => editor?.insert(s), () => {}))}><ClipboardPaste size={13} /> Paste</button>
+    <button class="nav-item" role="menuitem" onclick={() => menuAct(() => editor?.selectAll())}><span class="size-[13px]"></span> Select all</button>
+  </div>
+{/if}
 <SafeguardDialog bind:target={guardTarget} />
 <ConnectionDialog bind:open={connDialog} conn={connEdit} canswitch={canSwitch} canupdate={canUpdate} onsaved={openFirstTable} onedited={connEdited} />
 <DeleteConnectionDialog bind:target={connDelete} ondelete={deleteConnection} />
+<TableDangerDialog bind:target={danger} onconfirm={runDanger} />
+{#if notice}
+  {@const n = notice}
+  <div class="popover fixed bottom-3 left-3 z-50 flex max-w-md items-start gap-2 px-3 py-2 text-[12.5px] {n.ok ? 'text-ink' : 'text-red-700 dark:text-red-300'}" role={n.ok ? 'status' : 'alert'}>
+    <span class="min-w-0 flex-1 break-words">{n.text}</span>
+    <button class="grid size-5 shrink-0 place-items-center rounded text-faint hover:bg-hover hover:text-ink" aria-label="Dismiss" onclick={() => (notice = null)}><X size={12} /></button>
+  </div>
+{/if}
 <WritePreview />
 <CommandPalette
   bind:open={paletteOpen}

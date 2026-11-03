@@ -3,7 +3,7 @@
 //! session state (open transaction, SET, USE, temp tables) never reaches the next run.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,14 @@ pub struct QueryRun {
     pub elapsed_ms: u64,
 }
 
+/// How far a run has come: `done` statements finished of `total` for that run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
 // ---- cancel registry ----
 
 /// Raw SQLite handle, used only for `sqlite3_interrupt`.
@@ -115,6 +123,9 @@ struct Running {
     conn_id: String,
     database: String,
     cancelled: Arc<AtomicBool>,
+    /// Statements the split produced; `query_progress` reports `done` of it.
+    total: usize,
+    done: Arc<AtomicUsize>,
     session: Session,
 }
 
@@ -140,11 +151,13 @@ impl QueryRegistry {
     }
 
     /// The returned guard's `cancelled` is already set when a cancel for `query_id` came first.
+    /// `total` is the run's statement count, known before the run registers.
     fn register(
         &self,
         query_id: &str,
         conn_id: &str,
         database: &str,
+        total: usize,
     ) -> Result<RunGuard<'_>, AppError> {
         let mut reg = self.lock();
         if reg.running.contains_key(query_id) {
@@ -157,12 +170,15 @@ impl QueryRegistry {
             .remove(query_id)
             .is_some_and(|t| t.elapsed() < EARLY_CANCEL_TTL);
         let cancelled = Arc::new(AtomicBool::new(early));
+        let done = Arc::new(AtomicUsize::new(0));
         reg.running.insert(
             query_id.to_string(),
             Running {
                 conn_id: conn_id.to_string(),
                 database: database.to_string(),
                 cancelled: cancelled.clone(),
+                total,
+                done: done.clone(),
                 session: Session::Pending,
             },
         );
@@ -170,6 +186,7 @@ impl QueryRegistry {
             reg: self,
             id: query_id.to_string(),
             cancelled,
+            done,
         })
     }
 
@@ -182,6 +199,16 @@ impl QueryRegistry {
             id: query_id.to_string(),
         }
     }
+
+    /// Statements finished / total while the run lives, for `query_progress`.
+    fn progress(&self, query_id: &str) -> Option<QueryProgress> {
+        let reg = self.lock();
+        let r = reg.running.get(query_id)?;
+        Some(QueryProgress {
+            done: r.done.load(Ordering::SeqCst),
+            total: r.total,
+        })
+    }
 }
 
 /// Removes the run from the registry when the run ends or its future is dropped.
@@ -189,6 +216,7 @@ struct RunGuard<'a> {
     reg: &'a QueryRegistry,
     id: String,
     cancelled: Arc<AtomicBool>,
+    done: Arc<AtomicUsize>,
 }
 
 impl Drop for RunGuard<'_> {
@@ -273,6 +301,12 @@ pub async fn cancel(state: &AppState, query_id: &str) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// Statement progress of a running query; `None` for an unknown, finished, or not yet
+/// registered id (the entry is removed with the run).
+pub fn progress(state: &AppState, query_id: &str) -> Option<QueryProgress> {
+    state.queries.progress(query_id)
 }
 
 /// Sends the kill on an idle pooled connection, or on a new one outside the pool, so a cancel
@@ -494,12 +528,15 @@ where
     Ok((out, cut_off))
 }
 
+// `done` (statement progress) is the eighth argument; a struct for one private caller set adds nothing.
+#[allow(clippy::too_many_arguments)]
 async fn run_all<DB>(
     conn: &mut DB::Connection,
     stmts: &[String],
     reads: &[bool],
     limit: usize,
     cancelled: &AtomicBool,
+    done: &AtomicUsize,
     cell: CellFn<DB>,
     affected: AffectedFn<DB>,
 ) -> Result<Outcome, AppError>
@@ -520,6 +557,7 @@ where
             Ok((r, cut_off)) => {
                 out.cut_off = cut_off;
                 out.results.extend(r);
+                done.fetch_add(1, Ordering::SeqCst);
             }
             Err(_) if cancelled.load(Ordering::SeqCst) => return Err(cancelled_error()),
             Err(e) => {
@@ -811,8 +849,11 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
     let lone_read = reads == [true];
     let limit = clamp_limit(req.limit);
     let started = Instant::now();
-    let run = state.queries.register(&req.query_id, &conn.id, &database)?;
+    let run = state
+        .queries
+        .register(&req.query_id, &conn.id, &database, stmts.len())?;
     let cancelled = run.cancelled.clone();
+    let done = run.done.clone();
     if cancelled.load(Ordering::SeqCst) {
         return Err(cancelled_error());
     }
@@ -825,9 +866,16 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
                 .fetch_one(&mut *c)
                 .await?;
             let session = state.queries.attach(&req.query_id, Session::Pg(pid));
-            let r = run_all::<Postgres>(&mut c, &stmts, &reads, limit, &cancelled, pg_cell, |d| {
-                d.rows_affected()
-            })
+            let r = run_all::<Postgres>(
+                &mut c,
+                &stmts,
+                &reads,
+                limit,
+                &cancelled,
+                &done,
+                pg_cell,
+                |d| d.rows_affected(),
+            )
             .await;
             drop(session);
             let (reuse, ask) = after_run(lone_read, &r, &cancelled);
@@ -843,9 +891,16 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
                 .fetch_one(&mut *c)
                 .await?;
             let session = state.queries.attach(&req.query_id, Session::MySql(id));
-            let r = run_all::<MySql>(&mut c, &stmts, &reads, limit, &cancelled, mysql_cell, |d| {
-                d.rows_affected()
-            })
+            let r = run_all::<MySql>(
+                &mut c,
+                &stmts,
+                &reads,
+                limit,
+                &cancelled,
+                &done,
+                mysql_cell,
+                |d| d.rows_affected(),
+            )
             .await;
             drop(session);
             let (reuse, ask) = after_run(lone_read, &r, &cancelled);
@@ -868,6 +923,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
                 &reads,
                 limit,
                 &cancelled,
+                &done,
                 sqlite_cell,
                 |d| d.rows_affected(),
             )
@@ -943,8 +999,11 @@ async fn run_in_session(
     let mysql = conn.engine == Engine::Mysql;
     let limit = clamp_limit(req.limit);
     let started = Instant::now();
-    let run = state.queries.register(&req.query_id, &conn.id, database)?;
+    let run = state
+        .queries
+        .register(&req.query_id, &conn.id, database, stmts.len())?;
     let cancelled = run.cancelled.clone();
+    let done = run.done.clone();
     if cancelled.load(Ordering::SeqCst) {
         return Err(cancelled_error());
     }
@@ -994,7 +1053,10 @@ async fn run_in_session(
                 }
             }
             match exec(&mut s.conn, sql, reads[i], limit).await {
-                Ok(r) => results.extend(r),
+                Ok(r) => {
+                    results.extend(r);
+                    done.fetch_add(1, Ordering::SeqCst);
+                }
                 Err(_) if cancelled.load(Ordering::SeqCst) => return Err(cancelled_error()),
                 Err(e) => {
                     let mut e = AppError::from(e);
@@ -1108,10 +1170,10 @@ mod tests {
     fn registry_rejects_duplicate_ids_and_cleans_up() {
         let reg = QueryRegistry::default();
         {
-            let _g = reg.register("q1", "c", "db").unwrap();
+            let _g = reg.register("q1", "c", "db", 3).unwrap();
             assert!(reg.is_running("q1"));
             assert_eq!(
-                reg.register("q1", "c", "db").err().unwrap().code,
+                reg.register("q1", "c", "db", 3).err().unwrap().code,
                 ErrorCode::InvalidInput
             );
             {
@@ -1130,10 +1192,10 @@ mod tests {
     fn cancel_before_register_starts_the_run_cancelled() {
         let reg = QueryRegistry::default();
         reg.lock().early.insert("q1".into(), Instant::now());
-        let g = reg.register("q1", "c", "db").unwrap();
+        let g = reg.register("q1", "c", "db", 3).unwrap();
         assert!(g.cancelled.load(Ordering::SeqCst));
         drop(g);
-        let g = reg.register("q1", "c", "db").unwrap();
+        let g = reg.register("q1", "c", "db", 3).unwrap();
         assert!(
             !g.cancelled.load(Ordering::SeqCst),
             "an early cancel is used once"
@@ -1143,10 +1205,32 @@ mod tests {
             .early
             .insert("q2".into(), Instant::now() - EARLY_CANCEL_TTL);
         assert!(
-            !reg.register("q2", "c", "db")
+            !reg.register("q2", "c", "db", 3)
                 .unwrap()
                 .cancelled
                 .load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn progress_reports_done_of_total_and_stops_with_the_run() {
+        let reg = QueryRegistry::default();
+        assert!(reg.progress("q1").is_none(), "unknown id has no progress");
+        {
+            let g = reg.register("q1", "c", "db", 3).unwrap();
+            assert_eq!(
+                reg.progress("q1"),
+                Some(QueryProgress { done: 0, total: 3 })
+            );
+            g.done.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                reg.progress("q1"),
+                Some(QueryProgress { done: 1, total: 3 })
+            );
+        }
+        assert!(
+            reg.progress("q1").is_none(),
+            "the entry is removed with the run"
         );
     }
 

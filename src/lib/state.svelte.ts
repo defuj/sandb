@@ -39,6 +39,12 @@ export const ui = $state({
   chatOpen: true,
   page: 'query' as 'query' | 'settings' | 'audit',
   theme: 'light' as 'light' | 'dark' | 'system',
+  /** Sidebar width in px; the title bar uses it too, so the tabs stay in line with the main card. */
+  sidebarWidth: 224,
+  /** Editor height as a fraction of the main card; the results grid takes the rest. */
+  editorSplit: 0.34,
+  /** False hides the results grid; the editor then fills the card. */
+  resultsOpen: true,
 });
 
 export type Provider = 'ollama' | 'lmstudio' | 'openrouter' | 'openai' | 'custom';

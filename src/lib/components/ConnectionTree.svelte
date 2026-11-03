@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { ChevronRight, Table2, Plus, Layers, KeyRound, Columns2, Database, Pencil, Copy, Trash, Ellipsis, LoaderCircle, RotateCw, Eye, Lock } from '@lucide/svelte';
+  import { ChevronRight, Table2, Plus, Layers, KeyRound, Columns2, Database, Pencil, Copy, Trash, Ellipsis, LoaderCircle, RotateCw, Eye, Lock, Hash, FileCode, FileSearch, FilePlus, Download, Sheet, Eraser } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { db, active, engines, envDot, canWrite, type Conn } from '../state.svelte';
   import { schemas, nsOf, pkOf, colType } from '../mock';
   import { api, ApiError, type ColumnInfo, type TableInfo } from '../api';
+  import { displayName, type TableAction, type TableRef } from '../tableActions';
 
   let {
     selected,
@@ -12,6 +13,7 @@
     onedit,
     onduplicate,
     ondelete,
+    ontable,
   }: {
     selected: string | null;
     /** `at`: where the table is (real backends); the mock resolves it from the name. */
@@ -20,6 +22,7 @@
     onedit: (c: Conn) => void;
     onduplicate: (c: Conn) => void;
     ondelete: (c: Conn) => void;
+    ontable: (a: TableAction, c: Conn, t: TableRef) => void;
   } = $props();
 
   let menu = $state<{ x: number; y: number; c: Conn } | null>(null);
@@ -29,6 +32,7 @@
     e.stopPropagation();
     // A context menu opened from the keyboard reports (0, 0); place it under the row instead.
     const r = e.clientX === 0 && e.clientY === 0 ? (e.currentTarget as HTMLElement).getBoundingClientRect() : null;
+    tableMenu = null;
     menu = place(r ? r.left + 16 : e.clientX, r ? r.bottom + 2 : e.clientY, c);
   }
 
@@ -46,6 +50,38 @@
     const c = menu?.c;
     menu = null;
     if (c) fn(c);
+  }
+
+  // Table menu. `list`: the tree key of the table list, so Refresh reloads it.
+  let tableMenu = $state<{ x: number; y: number; c: Conn; t: TableRef; list: string | null } | null>(null);
+
+  function openTableMenu(e: MouseEvent, c: Conn, t: TableRef, list: string | null) {
+    e.preventDefault();
+    e.stopPropagation();
+    menu = null;
+    const r = e.clientX === 0 && e.clientY === 0 ? (e.currentTarget as HTMLElement).getBoundingClientRect() : null;
+    // Menu is w-60 (240px) and about 470px tall; keep it inside the window.
+    tableMenu = { x: Math.max(4, Math.min(r ? r.left + 16 : e.clientX, innerWidth - 244)), y: Math.max(4, Math.min(r ? r.bottom + 2 : e.clientY, innerHeight - 474)), c, t, list };
+  }
+
+  function tableAct(a: TableAction) {
+    const m = tableMenu;
+    tableMenu = null;
+    if (m) ontable(a, m.c, m.t);
+  }
+
+  function copyName() {
+    const m = tableMenu;
+    tableMenu = null;
+    if (m) navigator.clipboard?.writeText(displayName(m.t)).catch(() => {});
+  }
+
+  // Files are written by the desktop app only.
+  const canExport = api.kind === 'tauri';
+
+  /** Reloads the table list that holds `t`, e.g. after a drop. */
+  export function refreshTables(c: Conn, t: TableRef) {
+    if (!isMock) refresh(t.schema === null ? `${c.id}/${t.database}` : `${c.id}/${t.database}/${t.schema}`);
   }
 
   // Keys: connection id, `id/db`, `id/db/schema` (pg only), then `…/table`. Kept for the session only.
@@ -207,6 +243,7 @@
           style={pad(level, 20)}
           title="{s ? s + '.' : ''}{t.name}{t.kind === 'view' ? ' (view)' : ''}{t.rowEstimate != null && t.rowEstimate >= 0 ? ` · ~${t.rowEstimate} rows` : ''}"
           onclick={() => onopen(c, t.name, { database: d, schema: s })}
+          oncontextmenu={(e) => openTableMenu(e, c, { database: d, schema: s, name: t.name, kind: t.kind }, pk0)}
         >
           {#if t.kind === 'view'}<Eye size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{:else}<Table2 size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{/if}
           <span class="min-w-0 flex-1 truncate">{t.name}</span>
@@ -235,7 +272,7 @@
       {@const tk = `${pk0}/${t}`}
       {@const sel = selected === `${c.id}/${nsOf(c.engine, t)}/${t}`}
       <div class="relative">
-        <button class="nav-item {sel ? 'nav-item-active' : ''}" style={pad(level, 20)} title={c.engine === 'pg' ? `${nsOf(c.engine, t)}.${t}` : t} onclick={() => onopen(c, t)}>
+        <button class="nav-item {sel ? 'nav-item-active' : ''}" style={pad(level, 20)} title={c.engine === 'pg' ? `${nsOf(c.engine, t)}.${t}` : t} onclick={() => onopen(c, t)} oncontextmenu={(e) => openTableMenu(e, c, { database: c.database, schema: c.engine === 'pg' ? nsOf(c.engine, t) : null, name: t, kind: 'table' }, null)}>
           <Table2 size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />
           <span class="min-w-0 flex-1 truncate">{t}</span>
         </button>
@@ -257,7 +294,7 @@
   </div>
 {/snippet}
 
-<svelte:window onclick={() => (menu = null)} oncontextmenu={() => (menu = null)} onkeydown={(e) => { if (e.key === 'Escape') menu = null; }} />
+<svelte:window onclick={() => (menu = tableMenu = null)} oncontextmenu={() => (menu = tableMenu = null)} onkeydown={(e) => { if (e.key === 'Escape') menu = tableMenu = null; }} />
 
 <div class="label flex h-7 items-center px-2">
   <span class="flex-1">Connections</span>
@@ -388,5 +425,33 @@
     {#if !isMock}<button class="nav-item" role="menuitem" onclick={() => act((c) => refresh(c.id))}><RotateCw size={13} /> Refresh</button>{/if}
     <div class="mx-2 my-1 h-px bg-line"></div>
     <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" onclick={() => act(ondelete)}><Trash size={13} /> Delete…</button>
+  </div>
+{/if}
+
+{#if tableMenu}
+  {@const m = tableMenu}
+  {@const isView = m.t.kind === 'view'}
+  {@const noExport = canExport ? undefined : 'Needs the desktop app'}
+  <div class="popover fixed z-40 w-60 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    <div class="truncate px-2 pt-1 pb-1 text-[11.5px] text-faint" title={displayName(m.t)}>{displayName(m.t)}</div>
+    <button class="nav-item" role="menuitem" onclick={() => tableAct('view')}><Table2 size={13} /> View data</button>
+    <button class="nav-item" role="menuitem" onclick={() => tableAct('count')}><Hash size={13} /> Count rows</button>
+    <button class="nav-item" role="menuitem" onclick={copyName}><Copy size={13} /> Copy name</button>
+    <div class="mx-2 my-1 h-px bg-line"></div>
+    <button class="nav-item" role="menuitem" onclick={() => tableAct('ddl')}><FileCode size={13} /> Generate DDL</button>
+    <button class="nav-item" role="menuitem" onclick={() => tableAct('select')}><FileSearch size={13} /> Generate SELECT</button>
+    <button class="nav-item" role="menuitem" disabled={isView} onclick={() => tableAct('insert')}><FilePlus size={13} /> Generate INSERT</button>
+    <div class="mx-2 my-1 h-px bg-line"></div>
+    <button class="nav-item" role="menuitem" disabled={!canExport} title={noExport} onclick={() => tableAct('exportDdl')}><Download size={13} /> Export DDL…</button>
+    <button class="nav-item" role="menuitem" disabled={!canExport} title={noExport} onclick={() => tableAct('exportSql')}><Download size={13} /> Export as SQL (DDL + data)…</button>
+    <button class="nav-item" role="menuitem" disabled={!canExport} title={noExport} onclick={() => tableAct('exportCsv')}><Sheet size={13} /> Export as CSV…</button>
+    {#if m.list}
+      {@const list = m.list}
+      <div class="mx-2 my-1 h-px bg-line"></div>
+      <button class="nav-item" role="menuitem" onclick={() => { tableMenu = null; refresh(list); }}><RotateCw size={13} /> Refresh</button>
+    {/if}
+    <div class="mx-2 my-1 h-px bg-line"></div>
+    <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={isView || m.c.readOnly} title={m.c.readOnly ? 'The connection is read-only' : undefined} onclick={() => tableAct('truncate')}><Eraser size={13} /> Truncate…</button>
+    <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={m.c.readOnly} title={m.c.readOnly ? 'The connection is read-only' : undefined} onclick={() => tableAct('drop')}><Trash size={13} /> Drop {isView ? 'view' : 'table'}…</button>
   </div>
 {/if}

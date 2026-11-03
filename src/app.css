@@ -89,7 +89,7 @@ body { @apply bg-canvas text-ink font-sans antialiased text-[13px]; font-feature
   @apply text-muted enabled:hover:bg-hover enabled:hover:text-ink;
 }
 @utility nav-item {
-  @apply flex w-full h-[26px] items-center gap-2 rounded-md px-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-ink cursor-pointer;
+  @apply flex w-full h-[26px] items-center gap-2 rounded-md px-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-ink cursor-pointer disabled:pointer-events-none disabled:opacity-40;
 }
 @utility nav-item-active {
   @apply bg-active text-ink font-medium hover:bg-active;

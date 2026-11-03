@@ -83,7 +83,7 @@
         <ChevronDown size={13} class="shrink-0 text-faint" />
       </button>
       {#if menu === 'db'}
-        <div class="popover absolute top-full right-0 z-50 mt-1 max-h-72 w-56 overflow-auto p-1">
+        <div class="popover absolute top-full left-0 z-50 mt-1 max-h-72 w-56 overflow-auto p-1">
           <div class="label flex items-center gap-1.5 px-2 pt-1.5 pb-1">
             Databases {#if loading}<LoaderCircle size={11} class="animate-spin" />{/if}
           </div>

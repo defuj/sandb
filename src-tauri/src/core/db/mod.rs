@@ -1,3 +1,4 @@
+pub mod dump;
 pub mod export;
 pub mod introspect;
 pub mod pool;

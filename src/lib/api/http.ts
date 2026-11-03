@@ -36,6 +36,7 @@ export const httpBackend: Backend = {
   schemaSnapshot: (connId, database) => call('schema_snapshot', { connId, database }),
   runQuery: (request) => call('run_query', { request }),
   cancelQuery: (queryId) => call('cancel_query', { queryId }),
+  queryProgress: (queryId) => call('query_progress', { queryId }),
   commitTransaction: (tabId) => call('commit_transaction', { tabId }),
   rollbackTransaction: (tabId) => call('rollback_transaction', { tabId }),
   tabStatus: (tabId) => call('tab_status', { tabId }),
@@ -47,4 +48,6 @@ export const httpBackend: Backend = {
   classifyWrite: (engine, sql) => call('classify_write', { engine, sql }),
   runAiRead: (connId, database, sql) => call('run_ai_read', { connId, database, sql }),
   exportCsv: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' })),
+  tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
+  exportTableSql: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' })),
 };

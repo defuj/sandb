@@ -201,6 +201,10 @@ export const mockBackend: Backend = {
     return { statements, elapsedMs: total };
   },
   async cancelQuery() {},
+  // Mock runs are instant; a run always finishes before progress could be polled.
+  async queryProgress() {
+    return null;
+  },
   async commitTransaction(tabId) {
     if (!sessions.delete(tabId)) throw new ApiError({ code: 'invalid_input', message: 'No transaction is open in this tab' });
   },
@@ -216,6 +220,19 @@ export const mockBackend: Backend = {
   async quitApp() {},
   async exportCsv(_connId, _database, _sql, _tabId) {
     throw new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' });
+  },
+  // The prototype data has types and primary keys only, so the DDL has no defaults or other constraints.
+  async tableDdl(connId, _database, schema, table) {
+    const c = find(connId);
+    const s = mockSchema(c);
+    if (!s[table]) throw new ApiError({ code: 'not_found', message: `Table ${table} not found` });
+    const pk = pkOf(table);
+    const lines = s[table].map((col) => `  ${col} ${colType(s, table, col)}${pk.includes(col) ? ' NOT NULL' : ''}`);
+    if (pk.length) lines.push(`  PRIMARY KEY (${pk.join(', ')})`);
+    return `CREATE TABLE ${schema ? schema + '.' : ''}${table} (\n${lines.join(',\n')}\n);`;
+  },
+  async exportTableSql() {
+    throw new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' });
   },
   async guardCheck(_engine, sql) {
     return mockGuard(sql);

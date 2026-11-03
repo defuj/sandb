@@ -16,10 +16,10 @@ use serde_json::Value;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use sandb_lib::core::connections::{self, ConnectionInput, Engine};
-use sandb_lib::core::db::introspect;
 use sandb_lib::core::db::query::{self, RunRequest};
 use sandb_lib::core::db::readonly::{self, ReadLimits};
 use sandb_lib::core::db::session;
+use sandb_lib::core::db::{dump, introspect};
 use sandb_lib::core::error::{AppError, ErrorCode};
 use sandb_lib::core::guard;
 use sandb_lib::core::secrets::MemoryStore;
@@ -300,6 +300,13 @@ async fn dispatch(
             }
             .await,
         ),
+        "table_ddl" => reply(
+            async {
+                let a: ConnArgs = args(body)?;
+                dump::table_ddl(st, &a.conn_id, &a.database, a.schema.as_deref(), &a.table).await
+            }
+            .await,
+        ),
         "run_query" => reply(
             async {
                 let a: RunArgs = args(body)?;
@@ -314,6 +321,9 @@ async fn dispatch(
             }
             .await,
         ),
+        "query_progress" => {
+            reply(args::<CancelArgs>(body).map(|a| query::progress(st, &a.query_id)))
+        }
         "commit_transaction" => reply(
             async {
                 let a: TabArgs = args(body)?;
@@ -369,8 +379,8 @@ async fn dispatch(
             }
             .await,
         ),
-        // No export_csv: the bridge never writes files on request; the browser UI exports the
-        // loaded rows client-side instead.
+        // No export_csv or export_table_sql: the bridge never writes files on request; the
+        // browser UI exports the loaded rows client-side instead.
         _ => reply::<()>(Err(AppError::not_found(format!(
             "Unknown command {command}"
         )))),

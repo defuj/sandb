@@ -129,7 +129,7 @@ pub fn check(state: &AppState, req: &ExportRequest) -> Result<(), AppError> {
 }
 
 /// Hidden sibling of `path`, so the final rename stays on one file system.
-fn temp_path(path: &Path) -> PathBuf {
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

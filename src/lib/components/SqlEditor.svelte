@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
   import { EditorState, Compartment } from '@codemirror/state';
-  import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+  import { defaultKeymap, history, historyKeymap, selectAll as selectAllCmd } from '@codemirror/commands';
   import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
   import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
   import { autocompletion } from '@codemirror/autocomplete';
@@ -26,6 +26,72 @@
   export function selection() {
     const r = view?.state.selection.main;
     return view && r && !r.empty ? view.state.sliceDoc(r.from, r.to) : '';
+  }
+
+  /** Replaces the selection (or inserts at the cursor), as a paste would. */
+  export function insert(text: string) {
+    if (!view) return;
+    view.dispatch(view.state.replaceSelection(text));
+    view.focus();
+  }
+
+  export function selectAll() {
+    if (view) selectAllCmd(view);
+    view?.focus();
+  }
+
+  /** A right-click outside the selection puts the cursor there, so "statement at cursor" is the clicked one. */
+  export function pointAt(x: number, y: number) {
+    const pos = view?.posAtCoords({ x, y });
+    const r = view?.state.selection.main;
+    if (view && r && pos != null && (r.empty || pos < r.from || pos > r.to)) view.dispatch({ selection: { anchor: pos } });
+  }
+
+  /**
+   * The statement under the cursor, `;` included. On a blank line it takes the next statement; after
+   * the last one, the last one. '' when the editor holds no statement.
+   */
+  export function statementAt() {
+    if (!view) return '';
+    const doc = view.state.doc.toString();
+    const head = view.state.selection.main.head;
+    const parts = statementRanges(doc)
+      .map(([from, to]) => ({ to, text: doc.slice(from, to).trim() }))
+      .filter((p) => p.text && p.text !== ';');
+    return (parts.find((p) => head <= p.to) ?? parts.at(-1))?.text ?? '';
+  }
+
+  /**
+   * Cuts the text at `;` outside strings, quoted names, comments and Postgres dollar quotes, like the
+   * backend split. Each range ends after its `;`; the last one may have none.
+   */
+  function statementRanges(doc: string): [number, number][] {
+    const out: [number, number][] = [];
+    const skipTo = (i: number, s: string) => {
+      const e = doc.indexOf(s, i);
+      return e < 0 ? doc.length : e + s.length - 1;
+    };
+    let start = 0;
+    for (let i = 0; i < doc.length; i++) {
+      const ch = doc[i];
+      if ((ch === '-' && doc[i + 1] === '-') || (ch === '#' && dialect === 'mysql')) i = skipTo(i, '\n');
+      else if (ch === '/' && doc[i + 1] === '*') i = skipTo(i + 2, '*/');
+      else if (ch === "'" || ch === '"' || (ch === '`' && dialect === 'mysql')) {
+        // A doubled quote stays inside the string; MySQL also escapes with a backslash.
+        let j = i + 1;
+        while (j < doc.length && !(doc[j] === ch && doc[j + 1] !== ch)) j += doc[j] === ch || (doc[j] === '\\' && dialect === 'mysql') ? 2 : 1;
+        i = j;
+      } else if (ch === '$' && dialect === 'pg') {
+        // $$ or $tag$ opens a dollar quote; $1 (a parameter) does not match.
+        const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(doc.slice(i, i + 64))?.[0];
+        if (tag) i = skipTo(i + tag.length, tag);
+      } else if (ch === ';') {
+        out.push([start, i + 1]);
+        start = i + 1;
+      }
+    }
+    if (start < doc.length) out.push([start, doc.length]);
+    return out;
   }
 
   let el: HTMLDivElement;
