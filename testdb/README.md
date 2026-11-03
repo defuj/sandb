@@ -1,0 +1,48 @@
+# sandb test databases
+
+Throwaway databases and a mock LLM for sandb tests. Compose project: `sandb-test`.
+
+| Service  | Image          | Host port (127.0.0.1) | Databases |
+|----------|----------------|-----------------------|-----------|
+| pg16     | postgres:16    | 55416 | `shop`, `shop_staging` (schemas `public`, `analytics`) |
+| pg13     | postgres:13    | 55413 | same as pg16 |
+| mysql    | mysql:8.4      | 53384 | `shop`, `analytics` |
+| mariadb  | mariadb:11     | 53311 | `shop`, `analytics` |
+| mock-llm | node:22-alpine | 58080 | OpenAI-compatible API at `/v1` |
+
+SQLite fixtures: `sqlite/shop.db` and `sqlite/empty.db` (built by `pnpm db:sqlite`, ignored by git).
+
+## Credentials (local test-only, see `.env.test`)
+
+| User | Password | Rights |
+|------|----------|--------|
+| `postgres` / `root` | `sandb_test_root` | superuser |
+| `sandb_rw` | `sandb_rw_pw` | owner / ALL on `shop`, `analytics` (PG: also `shop_staging`) |
+| `sandb_ro` | `sandb_ro_pw` | SELECT only |
+
+## Commands (from `sandb/`)
+
+- `pnpm db:up`: start all services and wait until healthy (fails after 180 s and names the service).
+- `pnpm db:down`: stop and remove the stack. Data is on tmpfs, so nothing is left.
+- `pnpm db:reset`: down, then up with fresh seed data.
+- `pnpm db:sqlite`: rebuild the SQLite fixtures.
+- `pnpm mock-llm`: run the mock LLM locally on 58080 without Docker (stop the container first).
+
+## Mock LLM scenarios
+
+The keyword in the last user message picks the reply: `list`, `describe`, `count`, `bypass` (`DELETE FROM orders`),
+`write` (`propose_write`), `error` (HTTP 500), `slow` (20 chunks, 300 ms apart); anything else streams an echo.
+If the last message has role `tool`, the reply is text that quotes the first 200 characters of the tool result.
+Set `MOCK_LLM_KEY` to require `Authorization: Bearer <key>`.
+
+## Isolation rules
+
+- Only touch the `sandb-test` project: `docker compose -p sandb-test ...`. Never prune, never touch other containers.
+- Ports bind to 127.0.0.1 only. `up.sh` refuses to start if a port is in use by something else.
+- Tests use only these containers or temporary SQLite files.
+
+## Notes
+
+- MySQL 8.4 uses `caching_sha2_password`. Over plain TCP without TLS, a client must allow RSA key exchange
+  (`--get-server-public-key`, or `allowPublicKeyRetrieval` in drivers) until the first TLS login caches the password.
+- PostgreSQL 13 grants `CREATE ON SCHEMA public` to everyone by default. The seed revokes it, so `sandb_ro` is read-only on pg13 too.

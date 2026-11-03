@@ -1,0 +1,153 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+  --color-canvas: var(--c-canvas);
+  --color-surface: var(--c-surface);
+  --color-sunken: var(--c-sunken);
+  --color-field: var(--c-field);
+  --color-raised: var(--c-raised);
+  --color-hover: var(--c-hover);
+  --color-active: var(--c-active);
+  --color-line: var(--c-line);
+  --color-ink: var(--c-ink);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-accent: var(--c-accent);
+  --color-accent-fg: var(--c-accent-fg);
+}
+
+/* Warm graphite neutrals with one amber accent. `hover`/`active` are ink overlays, so they work on the
+   canvas and on surfaces alike. `faint` stays at 4.5:1 or more on canvas, surface and sunken. */
+:root {
+  --c-canvas: #eeede9;
+  --c-surface: #ffffff;
+  --c-sunken: #f7f6f3;
+  --c-field: #ffffff;
+  --c-raised: #ffffff;
+  --c-hover: color-mix(in srgb, #1c1b19 5%, transparent);
+  --c-active: color-mix(in srgb, #1c1b19 8.5%, transparent);
+  --c-line: #e5e3df;
+  --c-ink: #1c1b19;
+  --c-muted: #5f5b55;
+  --c-faint: #6e6a63;
+  --c-accent: #b45309;
+  --c-accent-fg: #ffffff;
+  --c-syn-string: #3d7a28;
+  --c-syn-number: #b2401a;
+  --c-syn-type: #7b4f98;
+  --card-shadow: 0 2px 4px -2px rgba(28, 27, 25, 0.1);
+}
+.dark {
+  --c-canvas: #121110;
+  --c-surface: #1b1a18;
+  --c-sunken: #211f1d;
+  --c-field: #232120;
+  --c-raised: #34312e;
+  --c-hover: color-mix(in srgb, #ecebe8 6%, transparent);
+  --c-active: color-mix(in srgb, #ecebe8 10%, transparent);
+  --c-line: #2e2b28;
+  --c-ink: #ecebe8;
+  --c-muted: #aeaaa3;
+  --c-faint: #928d85;
+  --c-accent: #eda33c;
+  --c-accent-fg: #1b1206;
+  --c-syn-string: #a9c08a;
+  --c-syn-number: #e48c62;
+  --c-syn-type: #c6a3d8;
+  --card-shadow: none;
+  color-scheme: dark;
+}
+
+html, body, #app { height: 100%; }
+body { @apply bg-canvas text-ink font-sans antialiased text-[13px]; font-feature-settings: 'cv11', 'ss01'; }
+::selection { background: color-mix(in srgb, var(--c-accent) 28%, transparent); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-line); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--c-faint); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 h-7 px-2.5 rounded-md text-[12.5px] font-medium whitespace-nowrap transition-colors select-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed;
+}
+/* Hover darkens in light mode: brightening would drop white-on-amber below 4.5:1. */
+@utility btn-primary {
+  @apply bg-accent text-accent-fg enabled:hover:brightness-90 dark:enabled:hover:brightness-110;
+}
+@utility btn-secondary {
+  @apply bg-surface text-ink shadow-[inset_0_0_0_1px_var(--c-line)] enabled:hover:bg-hover;
+}
+@utility btn-ghost {
+  @apply text-muted enabled:hover:bg-hover enabled:hover:text-ink;
+}
+@utility nav-item {
+  @apply flex w-full h-[26px] items-center gap-2 rounded-md px-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-ink cursor-pointer;
+}
+@utility nav-item-active {
+  @apply bg-active text-ink font-medium hover:bg-active;
+}
+@utility card {
+  @apply bg-surface rounded-[10px] shadow-[var(--card-shadow)];
+}
+/* Active title-bar tab: a small piece of the card surface on the canvas. Dark mode needs the edge, as surface and canvas are close. */
+@utility tab-on {
+  @apply bg-surface shadow-[0_1px_2px_rgba(28,27,25,.1),0_0_0_1px_rgba(28,27,25,.04)] dark:shadow-[0_0_0_1px_var(--c-line)];
+}
+/* Floating menus: unlike cards they need an edge, because they sit on top of other surfaces. */
+@utility popover {
+  @apply bg-surface rounded-lg border border-line shadow-[0_12px_32px_-8px_rgba(0,0,0,.3)];
+}
+@utility input {
+  @apply h-8 w-full rounded-md bg-field border border-line px-2.5 text-[13px] text-ink outline-none placeholder:text-faint focus:border-accent/70 focus:ring-3 focus:ring-accent/15 transition-[border-color,box-shadow];
+}
+/* Small sentence-case heading for groups, form fields and table columns. */
+@utility label {
+  @apply text-[11.5px] font-medium text-muted;
+}
+/* Segmented control: `seg` on the track, `seg-item` + `seg-on` on the options. */
+@utility seg {
+  @apply inline-flex items-center gap-0.5 rounded-md bg-sunken p-0.5 shadow-[inset_0_0_0_1px_var(--c-line)];
+}
+@utility seg-item {
+  @apply h-6 rounded-[5px] px-2.5 text-[12.5px] font-medium text-muted hover:text-ink cursor-pointer;
+}
+@utility seg-on {
+  @apply bg-raised text-ink shadow-[0_1px_2px_rgba(0,0,0,.12),0_0_0_1px_var(--c-line)] hover:text-ink;
+}
+@utility kbd {
+  @apply inline-flex h-[18px] min-w-[18px] items-center justify-center rounded border border-line px-1 font-sans text-[10.5px] leading-none text-faint;
+}
+/* Quiet pill; add a text color, e.g. `tag text-red-700 dark:text-red-400`. */
+@utility tag {
+  @apply inline-flex h-[18px] items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none bg-hover;
+}
+/* Shows an upper-case value (READ, ERROR) in sentence case without changing the text. */
+@utility sentence {
+  display: inline-block;
+  text-transform: lowercase;
+  &::first-letter { text-transform: uppercase; }
+}
+/* Modal shell: `dialog-backdrop` > `dialog` > `dialog-head` + `dialog-body` + `dialog-foot`. */
+@utility dialog-backdrop {
+  @apply fixed inset-0 z-50 grid place-items-center bg-black/35 p-4 dark:bg-black/55;
+}
+@utility dialog {
+  @apply relative w-full overflow-hidden rounded-xl border border-line bg-surface shadow-[0_24px_64px_-16px_rgba(0,0,0,.45)];
+}
+@utility dialog-head {
+  @apply flex items-center gap-2.5 px-5 pt-4 pb-1 text-[14px] font-semibold;
+}
+@utility dialog-body {
+  @apply px-5 py-3;
+}
+@utility dialog-foot {
+  @apply flex items-center justify-end gap-2 px-5 pt-2 pb-4;
+}

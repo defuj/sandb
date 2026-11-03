@@ -1,0 +1,53 @@
+[package]
+name = "sandb"
+version = "0.1.0"
+description = "Light database client with a BYOK AI chat"
+edition = "2024"
+rust-version = "1.90"
+default-run = "sandb"
+
+[lib]
+name = "sandb_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "sandb"
+path = "src/main.rs"
+
+[[bin]]
+name = "bridge"
+path = "src/bin/bridge.rs"
+required-features = ["dev-bridge"]
+
+[features]
+default = []
+# Dev-only HTTP bridge that serves the core over localhost for browser E2E tests.
+dev-bridge = ["dep:axum", "dep:tower-http", "dep:tempfile"]
+# Integration tests against the sandb-test docker stack (testdb/).
+it = []
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.5", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "mysql", "sqlite"] }
+aes-gcm = "0.10"
+uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+tempfile = { version = "3", optional = true }
+sqlparser = { version = "0.63", features = ["visitor"] }
+futures-util = "0.3"
+base64 = "0.22"
+tauri-plugin-dialog = "2"
+libsqlite3-sys = { version = "0.30", default-features = false }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[dev-dependencies]
+tempfile = "3"
