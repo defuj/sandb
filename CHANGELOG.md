@@ -4,6 +4,10 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-03
+
+- Test release for the auto-update flow. No functional changes.
+
 ## [0.1.0] - 2026-11-03
 
 First release.
