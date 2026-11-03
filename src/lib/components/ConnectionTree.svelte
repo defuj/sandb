@@ -381,15 +381,12 @@
 
 {#if menu}
   {@const m = menu}
-  {@const last = db.connections.length <= 1}
   <div class="popover fixed z-40 w-44 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <div class="truncate px-2 pt-1 pb-1 text-[11.5px] text-faint">{m.c.name}</div>
     <button class="nav-item" role="menuitem" onclick={() => act(onedit)}><Pencil size={13} /> Edit connection…</button>
     <button class="nav-item" role="menuitem" onclick={() => act(onduplicate)}><Copy size={13} /> Duplicate</button>
     {#if !isMock}<button class="nav-item" role="menuitem" onclick={() => act((c) => refresh(c.id))}><RotateCw size={13} /> Refresh</button>{/if}
     <div class="mx-2 my-1 h-px bg-line"></div>
-    <span class="block" title={last ? 'At least one connection must remain' : undefined}>
-      <button class="nav-item text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={last} onclick={() => act(ondelete)}><Trash size={13} /> Delete…</button>
-    </span>
+    <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" onclick={() => act(ondelete)}><Trash size={13} /> Delete…</button>
   </div>
 {/if}

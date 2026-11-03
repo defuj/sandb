@@ -4,6 +4,10 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-03
+
+- You can now delete the last connection. When no connection remains, sandb shows the "No connections yet" screen.
+
 ## [0.1.1] - 2026-11-03
 
 - Test release for the auto-update flow. No functional changes.

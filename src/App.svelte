@@ -318,7 +318,6 @@
 
   // Throws on a backend error; DeleteConnectionDialog shows it and keeps the connection.
   async function deleteConnection(c: Conn) {
-    if (db.connections.length <= 1) return;
     const wasActive = c.id === conn.id;
     if (wasActive && !confirmDiscard()) return;
     // One decision for every tab on the connection; Cancel leaves the delete dialog open.
@@ -327,15 +326,17 @@
     db.connections.splice(db.connections.findIndex((x) => x.id === c.id), 1);
     connDelete = null;
     // Other tabs on it move too; their results would otherwise stay editable against a deleted connection.
+    // With none left, they keep the stale id until the next saved connection claims the active tab.
+    const next = db.connections[0];
     for (const t of tabs.list) {
       if (t.connId !== c.id) continue;
-      setTabConn(t, db.connections[0]);
+      if (next) setTabConn(t, next);
       t.result = null;
       t.opened = null;
       // The backend dropped its session with the connection.
       t.status = null;
     }
-    if (wasActive) openFirstTable();
+    if (wasActive && next) openFirstTable();
   }
 
   function openFirstTable() {
