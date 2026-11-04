@@ -1,0 +1,576 @@
+//! The chat loop: model call, tool calls, tool results, and again, until the model answers
+//! with text only. Events stream to the UI; every run ends with exactly one `done` or `error`.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
+
+use crate::core::ai::client::{AiClient, Completion};
+use crate::core::ai::prompt::{self, PromptInput};
+use crate::core::ai::settings;
+use crate::core::ai::tools::{self, ToolContext};
+use crate::core::connections;
+use crate::core::db::introspect;
+use crate::core::error::{AppError, ErrorCode};
+use crate::core::guard::WriteInfo;
+use crate::core::state::AppState;
+
+/// Model calls in one `chat_send`.
+pub const MAX_STEPS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+/// An earlier turn of the chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRequest {
+    /// Key for `chat_cancel`.
+    pub chat_id: String,
+    pub conn_id: String,
+    /// `None`: the connection's own database.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// PG schema for `list_tables` and `describe_table`; `None` is `public`.
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Earlier turns, oldest first, without `message`.
+    #[serde(default)]
+    pub history: Vec<ChatTurn>,
+    pub message: String,
+    /// The chat's write mode. `propose_write` also needs a connection that is not read-only.
+    #[serde(default)]
+    pub allow_writes: bool,
+}
+
+/// One streamed event. JSON: `{"type": "text", "delta": "…"}` and so on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatEvent {
+    Text {
+        delta: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        /// The parsed arguments; `{}` when they are not a JSON object.
+        args: Value,
+    },
+    ToolResult {
+        id: String,
+        ok: bool,
+        /// Short text for the UI: `12 tables`, `5 rows · 42 ms`, or the error message.
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<Vec<String>>,
+        /// At most `tools::UI_ROWS` rows, for the local UI only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<Vec<Vec<Value>>>,
+        /// More rows exist than `rows` holds.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncated: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<AppError>,
+    },
+    /// A proposed write, sent before its `tool_result`. Nothing has run.
+    WritePreview {
+        id: String,
+        sql: String,
+        info: WriteInfo,
+    },
+    Error {
+        error: AppError,
+    },
+    Done,
+}
+
+/// Running chats by id, for `chat_cancel`.
+#[derive(Default)]
+pub struct ChatRegistry {
+    inner: Mutex<Running>,
+}
+
+#[derive(Default)]
+struct Running {
+    next: u64,
+    chats: HashMap<String, (u64, CancellationToken)>,
+}
+
+/// Removes its chat from the registry when dropped, unless a newer run took the id.
+struct Entry<'a> {
+    registry: &'a ChatRegistry,
+    id: String,
+    generation: u64,
+    token: CancellationToken,
+}
+
+impl Drop for Entry<'_> {
+    fn drop(&mut self) {
+        let mut r = self.registry.lock();
+        if r.chats
+            .get(&self.id)
+            .is_some_and(|(g, _)| *g == self.generation)
+        {
+            r.chats.remove(&self.id);
+        }
+    }
+}
+
+impl ChatRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Running> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a run. A run that still holds the same id is cancelled.
+    fn start(&self, id: &str) -> Entry<'_> {
+        let token = CancellationToken::new();
+        let mut r = self.lock();
+        r.next += 1;
+        let generation = r.next;
+        if let Some((_, old)) = r.chats.insert(id.to_string(), (generation, token.clone())) {
+            old.cancel();
+        }
+        Entry {
+            registry: self,
+            id: id.to_string(),
+            generation,
+            token,
+        }
+    }
+
+    /// Stops a running chat. An unknown id is not an error.
+    pub fn cancel(&self, id: &str) {
+        if let Some((_, token)) = self.lock().chats.get(id) {
+            token.cancel();
+        }
+    }
+
+    /// Stops every running chat, e.g. when the page that shows them reloads.
+    pub fn cancel_all(&self) {
+        for (_, token) in self.lock().chats.values() {
+            token.cancel();
+        }
+    }
+
+    pub fn is_running(&self, id: &str) -> bool {
+        self.lock().chats.contains_key(id)
+    }
+}
+
+/// Stops a running chat; its stream ends with a `cancelled` error.
+pub fn cancel(state: &AppState, chat_id: &str) {
+    state.chats.cancel(chat_id);
+}
+
+/// Runs one user message to the end. `emit` returns false when the receiver is gone; the run
+/// then stops as on a cancel. Setup errors also end as an `error` event.
+pub async fn run(state: &AppState, req: ChatRequest, mut emit: impl FnMut(ChatEvent) -> bool) {
+    let entry = state.chats.start(&req.chat_id);
+    let res = converse(state, &req, &entry.token, &mut emit).await;
+    drop(entry);
+    emit(match res {
+        Ok(()) => ChatEvent::Done,
+        Err(error) => ChatEvent::Error { error },
+    });
+}
+
+fn cancelled() -> AppError {
+    AppError::new(ErrorCode::Cancelled, "Stopped")
+}
+
+fn receiver_gone() -> AppError {
+    AppError::new(ErrorCode::Cancelled, "The chat was closed")
+}
+
+fn push_message(body: &mut Value, message: Value) {
+    if let Some(list) = body["messages"].as_array_mut() {
+        list.push(message);
+    }
+}
+
+async fn converse(
+    state: &AppState,
+    req: &ChatRequest,
+    token: &CancellationToken,
+    emit: &mut impl FnMut(ChatEvent) -> bool,
+) -> Result<(), AppError> {
+    if req.message.trim().is_empty() {
+        return Err(AppError::invalid("The message is empty"));
+    }
+    let conn = connections::get(state, &req.conn_id)?;
+    let settings = settings::load(state)?;
+    if settings.model.trim().is_empty() {
+        return Err(AppError::invalid("Choose an AI model in Settings first"));
+    }
+    let client = AiClient::new(&settings.base_url, settings::stored_key(state)?)?;
+    let database = connections::target_database(&conn, req.database.as_deref());
+    let schema = req
+        .schema
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // The summary is a help, not a need: on an error or a slow server the model uses the tools.
+    let limit = Duration::from_secs(settings.timeout_sec);
+    let snapshot = tokio::select! {
+        biased;
+        _ = token.cancelled() => return Err(cancelled()),
+        r = tokio::time::timeout(limit, introspect::schema_snapshot(state, &conn.id, &database)) => {
+            r.ok().and_then(Result::ok)
+        }
+    };
+    let system = prompt::system_prompt(&PromptInput {
+        conn: &conn,
+        database: &database,
+        schema,
+        snapshot: snapshot.as_ref(),
+        settings: &settings,
+        allow_writes: req.allow_writes,
+    });
+
+    let mut body = json!({
+        "model": settings.model,
+        "messages": [{"role": "system", "content": system}],
+        "stream": true,
+        "tools": tools::definitions(),
+        "tool_choice": "auto",
+    });
+    for turn in &req.history {
+        push_message(
+            &mut body,
+            json!({"role": turn.role, "content": turn.content}),
+        );
+    }
+    push_message(&mut body, json!({"role": "user", "content": req.message}));
+
+    let ctx = ToolContext {
+        state,
+        conn: &conn,
+        database: &database,
+        schema,
+        settings: &settings,
+        allow_writes: req.allow_writes,
+    };
+    for _ in 0..MAX_STEPS {
+        let answer: Completion = client
+            .chat_stream(&body, token, |delta| {
+                emit(ChatEvent::Text {
+                    delta: delta.to_string(),
+                })
+            })
+            .await?;
+        if answer.tool_calls.is_empty() {
+            return Ok(());
+        }
+        let calls: Vec<Value> = answer
+            .tool_calls
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                })
+            })
+            .collect();
+        let text = (!answer.text.is_empty()).then_some(answer.text.as_str());
+        push_message(
+            &mut body,
+            json!({"role": "assistant", "content": text, "tool_calls": calls}),
+        );
+        for call in &answer.tool_calls {
+            let args = tools::parse_args(&call.arguments)
+                .map(Value::Object)
+                .unwrap_or_else(|| json!({}));
+            if !emit(ChatEvent::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                args,
+            }) {
+                return Err(receiver_gone());
+            }
+            let out = tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(cancelled()),
+                out = tools::execute(&ctx, &call.id, &call.name, &call.arguments) => out,
+            };
+            for ev in out.events {
+                if !emit(ev) {
+                    return Err(receiver_gone());
+                }
+            }
+            push_message(
+                &mut body,
+                json!({"role": "tool", "tool_call_id": call.id, "content": out.content}),
+            );
+        }
+    }
+    Err(AppError::new(
+        ErrorCode::AiProtocol,
+        format!("The assistant stopped after {MAX_STEPS} steps without an answer"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ai::client::tests::{done, finish_chunk, head, serve, sse, text_chunk};
+    use crate::core::ai::settings::AiSettings;
+    use crate::core::connections::{ConnectionInput, Engine, Env, SslMode};
+    use crate::core::secrets::MemoryStore;
+
+    fn state_with(base: &str) -> (tempfile::TempDir, AppState, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let st = AppState::new(dir.path(), Box::new(MemoryStore::new())).unwrap();
+        settings::save(
+            &st,
+            AiSettings {
+                base_url: base.into(),
+                model: "m".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let db = dir.path().join("t.db");
+        // An empty file is an empty SQLite database.
+        std::fs::write(&db, b"").unwrap();
+        let conn = connections::create(
+            &st,
+            ConnectionInput {
+                name: "t".into(),
+                engine: Engine::Sqlite,
+                env: Env::Local,
+                host: String::new(),
+                port: 0,
+                database: "main".into(),
+                user: String::new(),
+                ssl: SslMode::Disable,
+                file: db.to_string_lossy().into_owned(),
+                ai_write: false,
+                read_only: false,
+                version: None,
+            },
+            None,
+        )
+        .unwrap();
+        (dir, st, conn.id)
+    }
+
+    fn request(conn_id: &str, message: &str) -> ChatRequest {
+        ChatRequest {
+            chat_id: "chat-1".into(),
+            conn_id: conn_id.into(),
+            database: None,
+            schema: None,
+            history: vec![ChatTurn {
+                role: ChatRole::User,
+                content: "earlier".into(),
+            }],
+            message: message.into(),
+            allow_writes: false,
+        }
+    }
+
+    async fn collect(st: &AppState, req: ChatRequest) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        run(st, req, |e| {
+            events.push(e);
+            true
+        })
+        .await;
+        events
+    }
+
+    #[test]
+    fn events_serialize_with_snake_case_type() {
+        let v = serde_json::to_value(ChatEvent::ToolCall {
+            id: "c1".into(),
+            name: "list_tables".into(),
+            args: json!({}),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "tool_call", "id": "c1", "name": "list_tables", "args": {}})
+        );
+        let v = serde_json::to_value(ChatEvent::ToolResult {
+            id: "c1".into(),
+            ok: true,
+            summary: "1 row".into(),
+            columns: None,
+            rows: None,
+            truncated: None,
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "tool_result", "id": "c1", "ok": true, "summary": "1 row"})
+        );
+        assert_eq!(
+            serde_json::to_value(ChatEvent::Done).unwrap(),
+            json!({"type": "done"})
+        );
+    }
+
+    #[test]
+    fn request_parses_camel_case_and_rejects_other_roles() {
+        let r: ChatRequest = serde_json::from_value(json!({
+            "chatId": "a", "connId": "b", "database": null, "schema": null,
+            "history": [{"role": "assistant", "content": "x"}], "message": "m", "allowWrites": true
+        }))
+        .unwrap();
+        assert!(r.allow_writes);
+        assert_eq!(r.history[0].role, ChatRole::Assistant);
+        let bad = serde_json::from_value::<ChatRequest>(json!({
+            "chatId": "a", "connId": "b", "history": [{"role": "system", "content": "x"}], "message": "m"
+        }));
+        assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn text_answer_ends_with_done_and_sends_history() {
+        let (base, mut reqs) = serve(vec![
+            head("200 OK", "text/event-stream"),
+            text_chunk("Hi "),
+            text_chunk("there"),
+            finish_chunk("stop"),
+            done(),
+        ])
+        .await;
+        let (_d, st, conn) = state_with(&base);
+        let events = collect(&st, request(&conn, "hello")).await;
+        assert_eq!(
+            events,
+            vec![
+                ChatEvent::Text {
+                    delta: "Hi ".into()
+                },
+                ChatEvent::Text {
+                    delta: "there".into()
+                },
+                ChatEvent::Done,
+            ]
+        );
+        assert!(!st.chats.is_running("chat-1"));
+        let raw = reqs.recv().await.unwrap();
+        let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1], json!({"role": "user", "content": "earlier"}));
+        assert_eq!(msgs[2], json!({"role": "user", "content": "hello"}));
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["tools"].as_array().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn endless_tool_calls_stop_after_max_steps() {
+        let (base, mut reqs) = serve(vec![
+            head("200 OK", "text/event-stream"),
+            sse(json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c", "function": {"name": "list_tables", "arguments": "{}"}}
+            ]}, "finish_reason": "tool_calls"}]})),
+            done(),
+        ])
+        .await;
+        let (_d, st, conn) = state_with(&base);
+        let events = collect(&st, request(&conn, "loop")).await;
+        let last = events.last().unwrap();
+        match last {
+            ChatEvent::Error { error } => {
+                assert_eq!(error.code, ErrorCode::AiProtocol);
+                assert_eq!(
+                    error.message,
+                    "The assistant stopped after 8 steps without an answer"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let results = events
+            .iter()
+            .filter(|e| matches!(e, ChatEvent::ToolResult { ok: true, .. }))
+            .count();
+        assert_eq!(results, MAX_STEPS);
+        let mut calls = 0;
+        while reqs.try_recv().is_ok() {
+            calls += 1;
+        }
+        assert_eq!(calls, MAX_STEPS);
+    }
+
+    #[tokio::test]
+    async fn setup_errors_are_error_events() {
+        let (base, _r) = serve(vec![]).await;
+        let (_d, st, _conn) = state_with(&base);
+        let events = collect(&st, request("missing", "hi")).await;
+        assert!(matches!(
+            &events[..],
+            [ChatEvent::Error { error }] if error.code == ErrorCode::NotFound
+        ));
+        let events = collect(&st, request("missing", "  ")).await;
+        assert!(matches!(
+            &events[..],
+            [ChatEvent::Error { error }] if error.code == ErrorCode::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn receiver_gone_stops_the_run() {
+        let (base, _r) = serve(vec![
+            head("200 OK", "text/event-stream"),
+            text_chunk("a"),
+            (3_000, done().1),
+        ])
+        .await;
+        let (_d, st, conn) = state_with(&base);
+        let started = std::time::Instant::now();
+        let mut n = 0;
+        run(&st, request(&conn, "hi"), |_| {
+            n += 1;
+            false
+        })
+        .await;
+        // The text delta, then the terminal event that nobody receives.
+        assert_eq!(n, 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!st.chats.is_running("chat-1"));
+    }
+
+    #[test]
+    fn registry_keeps_a_newer_run() {
+        let reg = ChatRegistry::default();
+        let first = reg.start("x");
+        let second = reg.start("x");
+        assert!(first.token.is_cancelled());
+        drop(first);
+        assert!(reg.is_running("x"));
+        reg.cancel("x");
+        assert!(second.token.is_cancelled());
+        drop(second);
+        assert!(!reg.is_running("x"));
+        reg.cancel("unknown");
+    }
+
+    #[test]
+    fn cancel_all_stops_every_run() {
+        let reg = ChatRegistry::default();
+        let a = reg.start("a");
+        let b = reg.start("b");
+        reg.cancel_all();
+        assert!(a.token.is_cancelled() && b.token.is_cancelled());
+    }
+}

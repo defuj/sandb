@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::ai::settings::AiSettings;
 use crate::core::connections::Connection;
 use crate::core::error::AppError;
 
@@ -18,10 +19,13 @@ struct ConnectionsFile {
     connections: Vec<Connection>,
 }
 
-/// Placeholder; later phases add the AI settings here.
+/// App settings. Missing sections take their default, so older files still load.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Settings {}
+pub struct Settings {
+    #[serde(default)]
+    pub ai: AiSettings,
+}
 
 pub struct Store {
     dir: PathBuf,
@@ -196,8 +200,20 @@ mod tests {
     fn settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path()).unwrap();
-        s.save_settings(&Settings::default()).unwrap();
+        let mut settings = Settings::default();
+        settings.ai.model = "qwen2.5:7b".into();
+        settings.ai.max_rows = 42;
+        s.save_settings(&settings).unwrap();
         assert!(dir.path().join(SETTINGS_FILE).exists());
+        assert_eq!(s.load_settings().unwrap(), settings);
+    }
+
+    /// Files written before phase 4 hold `{}`: they load with the default AI settings.
+    #[test]
+    fn empty_settings_file_loads_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), b"{}").unwrap();
+        let s = Store::new(dir.path()).unwrap();
         assert_eq!(s.load_settings().unwrap(), Settings::default());
     }
 

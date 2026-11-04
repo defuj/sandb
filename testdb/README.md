@@ -34,6 +34,7 @@ The keyword in the last user message picks the reply: `list`, `describe`, `count
 `write` (`propose_write`), `error` (HTTP 500), `slow` (20 chunks, 300 ms apart); anything else streams an echo.
 If the last message has role `tool`, the reply is text that quotes the first 200 characters of the tool result.
 Set `MOCK_LLM_KEY` to require `Authorization: Bearer <key>`.
+`GET /_requests` returns the parsed bodies of the last 100 `POST /v1/chat/completions` requests (oldest first), so tests can check what was sent to the model.
 
 ## Isolation rules
 

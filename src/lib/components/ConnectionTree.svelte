@@ -16,14 +16,32 @@
     ontable,
   }: {
     selected: string | null;
-    /** `at`: where the table is (real backends); the mock resolves it from the name. */
-    onopen: (c: Conn, table: string, at?: { database: string; schema: string | null }) => void;
+    /** Double-click, ⌘/Ctrl-click or Enter on a table: open it in a table tab. A single click only selects it. */
+    onopen: (c: Conn, t: TableRef) => void;
     onnew: () => void;
     onedit: (c: Conn) => void;
     onduplicate: (c: Conn) => void;
     ondelete: (c: Conn) => void;
     ontable: (a: TableAction, c: Conn, t: TableRef) => void;
   } = $props();
+
+  // A single click marks a table row; the highlight then follows the active tab again when it changes.
+  let picked = $state<string | null>(null);
+  $effect(() => {
+    selected;
+    picked = null;
+  });
+  const hl = $derived(picked ?? selected);
+
+  function tableClick(e: MouseEvent, key: string, c: Conn, t: TableRef) {
+    if (e.metaKey || e.ctrlKey) onopen(c, t);
+    else picked = key;
+  }
+  function tableKey(e: KeyboardEvent, c: Conn, t: TableRef) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    onopen(c, t);
+  }
 
   let menu = $state<{ x: number; y: number; c: Conn } | null>(null);
 
@@ -236,14 +254,17 @@
   <div class="relative" style="background:{guides(anc)}">
     {#each tableList(pk0) as t (t.name)}
       {@const tk = `${pk0}/${t.name}`}
-      {@const sel = selected === `${c.id}/${d}/${s ?? ''}/${t.name}`}
+      {@const sel = hl === `${c.id}/${d}/${s ?? ''}/${t.name}`}
+      {@const ref = { database: d, schema: s, name: t.name, kind: t.kind }}
       <div class="relative">
         <button
-          class="nav-item {sel ? 'nav-item-active' : ''}"
+          class="nav-item select-none {sel ? 'nav-item-active' : ''}"
           style={pad(level, 20)}
           title="{s ? s + '.' : ''}{t.name}{t.kind === 'view' ? ' (view)' : ''}{t.rowEstimate != null && t.rowEstimate >= 0 ? ` · ~${t.rowEstimate} rows` : ''}"
-          onclick={() => onopen(c, t.name, { database: d, schema: s })}
-          oncontextmenu={(e) => openTableMenu(e, c, { database: d, schema: s, name: t.name, kind: t.kind }, pk0)}
+          onclick={(e) => tableClick(e, `${c.id}/${d}/${s ?? ''}/${t.name}`, c, ref)}
+          ondblclick={() => onopen(c, ref)}
+          onkeydown={(e) => tableKey(e, c, ref)}
+          oncontextmenu={(e) => openTableMenu(e, c, ref, pk0)}
         >
           {#if t.kind === 'view'}<Eye size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{:else}<Table2 size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{/if}
           <span class="min-w-0 flex-1 truncate">{t.name}</span>
@@ -270,9 +291,10 @@
   <div class="relative" style="background:{guides(anc)}">
     {#each tables as t (t)}
       {@const tk = `${pk0}/${t}`}
-      {@const sel = selected === `${c.id}/${nsOf(c.engine, t)}/${t}`}
+      {@const sel = hl === `${c.id}/${nsOf(c.engine, t)}/${t}`}
+      {@const ref = { database: c.database, schema: c.engine === 'pg' ? nsOf(c.engine, t) : null, name: t, kind: 'table' as const }}
       <div class="relative">
-        <button class="nav-item {sel ? 'nav-item-active' : ''}" style={pad(level, 20)} title={c.engine === 'pg' ? `${nsOf(c.engine, t)}.${t}` : t} onclick={() => onopen(c, t)} oncontextmenu={(e) => openTableMenu(e, c, { database: c.database, schema: c.engine === 'pg' ? nsOf(c.engine, t) : null, name: t, kind: 'table' }, null)}>
+        <button class="nav-item select-none {sel ? 'nav-item-active' : ''}" style={pad(level, 20)} title={c.engine === 'pg' ? `${nsOf(c.engine, t)}.${t}` : t} onclick={(e) => tableClick(e, `${c.id}/${nsOf(c.engine, t)}/${t}`, c, ref)} ondblclick={() => onopen(c, ref)} onkeydown={(e) => tableKey(e, c, ref)} oncontextmenu={(e) => openTableMenu(e, c, ref, null)}>
           <Table2 size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />
           <span class="min-w-0 flex-1 truncate">{t}</span>
         </button>

@@ -16,16 +16,24 @@ Related documents:
 | 2 | Schema tree, editor runs, paging, cancel, CSV | Yes | Yes (2 rounds) | PASS |
 | 3 | AI read guard and read-only executor | Yes | APPROVE (6 rounds) | PASS (BACKEND) |
 | 3b | Read-only connection, Production manual commit, editor target | Yes | Yes (1 round; 7 P1, 4 P2, 6 P3 all fixed) | PASS (bridge, final code) |
-| 4 | AI service (streaming client, tool loop) | No | No | No |
-| 5 | Chat panel, write preview, safeguard toggle, audit log | No | No | No |
+| 4 | AI service (streaming client, tool loop) | Yes | Yes (1 round; 1 P1, 4 P3 all fixed) | PASS (bridge smoke, final code) |
+| 5 | Chat panel, write preview, safeguard toggle, audit log | Partly: Settings save and Test, live chat, Stop | No | Partly (bridge smoke) |
 | 6 | Edit mode in the result grid | No | No | No |
 | 7 | Hardening, release build, final review and QA | No | No | No |
 
-Current gate results (2026-11-03, after phase 3b review fixes):
-- `cargo fmt --check`: pass. `cargo clippy --all-targets -- -D warnings`: pass (also with `--features dev-bridge`).
-- `cargo test --lib`: 106 passed.
-- `cargo test --features it -- --test-threads=4`: it_connections 9, it_query 22, it_readonly 13, it_conn_ro 4, it_session 21. All pass.
+Current gate results (2026-11-04, after phase 4 review fixes):
+- `cargo fmt --check`: pass. `cargo clippy --all-targets -- -D warnings`: pass (also with `--features dev-bridge` and `--features it`).
+- `cargo test --lib`: 176 passed.
+- `cargo test --features it -- --test-threads=4` (with `SANDB_MOCK_LLM_URL` set to a mock that has the `/_requests` endpoint): it_ai 12, it_connections 9, it_query 24, it_readonly 13, it_conn_ro 4, it_session 22. All pass.
 - `pnpm check`: 0 errors, 0 warnings. `pnpm build`: pass.
+
+Phase 4 notes:
+- Code: `src-tauri/src/core/ai/` (`settings.rs`, `client.rs`, `tools.rs`, `prompt.rs`, `session.rs`). Commands: `get_ai_settings`, `save_ai_settings`, `set_ai_key`, `test_ai`, `chat_send`, `chat_cancel` (Tauri and bridge; the bridge streams `chat_send` as SSE).
+- `test_ai` calls `GET /models` and fails with `model_not_found` if the model is not in the list (`name:latest` also matches, for Ollama).
+- `propose_write` never runs SQL. It refuses with `write_blocked` when the chat's write mode is off or the connection is read-only. Else it sends `write_preview`. `allowWrites` comes from the chat panel toggle, which is UI-only. `approve_write` (phase 5) must check the saved connection again.
+- Privacy `schema`: the model gets column names, the row count and the truncated flag. Database error text is replaced by the SQLSTATE or error number.
+- Stop drops the running AI read. The database query stops at its own time limit.
+- The `sandb-test` mock-llm container runs the old `server.mjs` until it restarts. `it_ai` needs the new `GET /_requests` endpoint.
 
 Phase 3b semantics after the review fixes:
 - A tab session exists only while its transaction holds uncommitted work. A run of plain reads uses the pool. Commit, Rollback, a typed COMMIT and a MySQL implicit commit at the end of a run all close the session, so `tab_status` returns `null` then.
@@ -150,7 +158,7 @@ Goal: an OpenAI-compatible streaming client and a tool loop in Rust. No UI in th
 10. Review with a security focus (prompt injection from data in rows, key handling), then QA BACKEND.
 
 ## 4. Phase 5: chat panel, write preview, audit log
-The UI exists as a prototype on mock data: `ChatPanel.svelte`, `chat.svelte.ts`, `WritePreview.svelte`, `SafeguardDialog.svelte`, `AuditPage.svelte`, `audit.svelte.ts` and the AI part of `SettingsPage.svelte`. This phase connects them to the real backend.
+The UI exists as a prototype on mock data: `ChatPanel.svelte` (with the inline approval and question cards and the chat history), `chat.svelte.ts`, `SafeguardDialog.svelte`, `AuditPage.svelte`, `audit.svelte.ts` and the AI part of `SettingsPage.svelte`. This phase connects them to the real backend.
 
 1. Settings page: save the AI settings and the key through phase 4 commands, and add a "Test" button.
 2. Chat panel:
@@ -158,7 +166,7 @@ The UI exists as a prototype on mock data: `ChatPanel.svelte`, `chat.svelte.ts`,
    - Add a Stop button.
    - Each SQL block has "Insert into editor". It inserts into the active tab.
 3. Write approval:
-   - `propose_write` sends `write_preview`. `WritePreview.svelte` shows the SQL, the statement type (`classify_write`), and red warnings for `UPDATE`/`DELETE` without `WHERE`, `DROP` and `TRUNCATE`.
+   - `propose_write` sends `write_preview`. The approval card in `ChatPanel.svelte` shows the SQL, the statement type (`classify_write`), and red warnings for `UPDATE`/`DELETE` without `WHERE`, `DROP` and `TRUNCATE`.
    - Approve runs the SQL in one transaction. Deny writes nothing.
    - Commands: `approve_write(id)`, `deny_write(id)`.
    - A pending approval uses a `oneshot` in the state, with a timeout that denies.
@@ -236,5 +244,5 @@ The UI exists as a prototype on mock rows (`edits.svelte.ts`, `ResultsGrid.svelt
 2. Start the dev bridge with a new token: `SANDB_BRIDGE_TOKEN=<token> pnpm bridge` (port 58123).
 3. Start Vite in bridge mode: `VITE_BACKEND=bridge VITE_BRIDGE_TOKEN=<token> pnpm dev` (port 5199).
 4. Restart the bridge after each Rust change, because it runs a compiled binary.
-5. Next task: section 3 (phase 4, AI service backend).
+5. Next task: section 4 (phase 5). Settings save and Test, the live chat and Stop are done. Write approval (`approve_write`, `deny_write`), the saved safeguard toggle, cancel on connection delete and `audit.db` are left.
 6. To keep each worker request small, give each worker one section of this file, not the full phase.

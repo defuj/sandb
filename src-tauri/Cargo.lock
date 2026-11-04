@@ -3366,6 +3366,8 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "libsqlite3-sys",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlparser",
@@ -3378,6 +3380,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tower-http",
  "uuid",
 ]

@@ -1,6 +1,7 @@
 //! Dev-only HTTP bridge: serves the same core over `127.0.0.1` so the browser UI (Vite) can be
 //! tested end to end without the Tauri shell. Never part of a release build (`dev-bridge` feature).
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use axum::Router;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
@@ -15,6 +17,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use sandb_lib::core::ai::session::{self as chat, ChatEvent, ChatRequest};
+use sandb_lib::core::ai::settings::{self as ai_settings, AiSettings};
 use sandb_lib::core::connections::{self, ConnectionInput, Engine};
 use sandb_lib::core::db::query::{self, RunRequest};
 use sandb_lib::core::db::readonly::{self, ReadLimits};
@@ -117,13 +121,18 @@ fn status_of(e: &AppError) -> StatusCode {
     match e.code {
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
         ErrorCode::InvalidInput => StatusCode::BAD_REQUEST,
-        ErrorCode::AuthFailed | ErrorCode::Database => StatusCode::UNPROCESSABLE_ENTITY,
-        ErrorCode::ConnectFailed => StatusCode::BAD_GATEWAY,
+        ErrorCode::AuthFailed | ErrorCode::Database | ErrorCode::ModelNotFound => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ErrorCode::ConnectFailed | ErrorCode::AiUpstream | ErrorCode::AiProtocol => {
+            StatusCode::BAD_GATEWAY
+        }
         ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
         ErrorCode::Cancelled => StatusCode::CONFLICT,
-        ErrorCode::GuardRejected | ErrorCode::ReadOnlyViolation | ErrorCode::ConnectionReadOnly => {
-            StatusCode::FORBIDDEN
-        }
+        ErrorCode::GuardRejected
+        | ErrorCode::ReadOnlyViolation
+        | ErrorCode::ConnectionReadOnly
+        | ErrorCode::WriteBlocked => StatusCode::FORBIDDEN,
         ErrorCode::SecretStore | ErrorCode::Io | ErrorCode::Internal => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -218,6 +227,50 @@ struct AiReadArgs {
     sql: String,
 }
 
+#[derive(Deserialize)]
+struct AiSettingsArgs {
+    settings: AiSettings,
+}
+
+#[derive(Deserialize)]
+struct AiKeyArgs {
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TestAiArgs {
+    settings: AiSettings,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatArgs {
+    request: ChatRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatCancelArgs {
+    chat_id: String,
+}
+
+/// `chat_send` as `text/event-stream`: one `data: <ChatEvent JSON>` per event. The chat runs in
+/// its own task; a closed response drops the receiver, which stops the chat.
+fn chat_stream(ctx: Arc<Ctx>, request: ChatRequest) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
+    tokio::spawn(async move {
+        chat::run(&ctx.state, request, move |e| tx.send(e).is_ok()).await;
+    });
+    let events = futures_util::stream::unfold(rx, |mut rx| async move {
+        let ev = rx.recv().await?;
+        let data = serde_json::to_string(&ev).unwrap_or_default();
+        Some((Ok::<_, Infallible>(Event::default().data(data)), rx))
+    });
+    Sse::new(events).into_response()
+}
+
 async fn dispatch(
     State(ctx): State<Arc<Ctx>>,
     Path(command): Path<String>,
@@ -290,6 +343,20 @@ async fn dispatch(
                 let a: ConnArgs = args(body)?;
                 introspect::list_columns(st, &a.conn_id, &a.database, a.schema.as_deref(), &a.table)
                     .await
+            }
+            .await,
+        ),
+        "table_properties" => reply(
+            async {
+                let a: ConnArgs = args(body)?;
+                introspect::table_properties(
+                    st,
+                    &a.conn_id,
+                    &a.database,
+                    a.schema.as_deref(),
+                    &a.table,
+                )
+                .await
             }
             .await,
         ),
@@ -379,6 +446,25 @@ async fn dispatch(
             }
             .await,
         ),
+        "get_ai_settings" => reply(ai_settings::get(st)),
+        "save_ai_settings" => {
+            reply(args::<AiSettingsArgs>(body).and_then(|a| ai_settings::save(st, a.settings)))
+        }
+        "set_ai_key" => {
+            reply(args::<AiKeyArgs>(body).and_then(|a| ai_settings::set_key(st, a.key)))
+        }
+        "test_ai" => reply(
+            async {
+                let a: TestAiArgs = args(body)?;
+                ai_settings::test(st, a.settings, a.key).await
+            }
+            .await,
+        ),
+        "chat_send" => match args::<ChatArgs>(body) {
+            Ok(a) => chat_stream(ctx.clone(), a.request),
+            Err(e) => reply::<()>(Err(e)),
+        },
+        "chat_cancel" => reply(args::<ChatCancelArgs>(body).map(|a| chat::cancel(st, &a.chat_id))),
         // No export_csv or export_table_sql: the bridge never writes files on request; the
         // browser UI exports the loaded rows client-side instead.
         _ => reply::<()>(Err(AppError::not_found(format!(

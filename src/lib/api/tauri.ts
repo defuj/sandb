@@ -1,5 +1,5 @@
-import { invoke } from '@tauri-apps/api/core';
-import { ApiError, type Backend } from './types';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { ApiError, type Backend, type ChatEvent, type ChatRequest } from './types';
 
 async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   try {
@@ -7,6 +7,20 @@ async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise
   } catch (e) {
     throw ApiError.from(e);
   }
+}
+
+// Channel messages and the command's return travel on different paths, so the last events can arrive after
+// the invoke returns. Wait a short time for the terminal event before the promise resolves.
+async function chatSend(request: ChatRequest, onEvent: (e: ChatEvent) => void): Promise<void> {
+  let ended: () => void = () => {};
+  const terminal = new Promise<void>((r) => (ended = r));
+  const channel = new Channel<ChatEvent>();
+  channel.onmessage = (e) => {
+    onEvent(e);
+    if (e.type === 'done' || e.type === 'error') ended();
+  };
+  await call('chat_send', { request, onEvent: channel });
+  await Promise.race([terminal, new Promise((r) => setTimeout(r, 2000))]);
 }
 
 export const tauriBackend: Backend = {
@@ -21,6 +35,7 @@ export const tauriBackend: Backend = {
   listSchemas: (connId, database) => call('list_schemas', { connId, database }),
   listTables: (connId, database, schema) => call('list_tables', { connId, database, schema }),
   listColumns: (connId, database, schema, table) => call('list_columns', { connId, database, schema, table }),
+  tableProperties: (connId, database, schema, table) => call('table_properties', { connId, database, schema, table }),
   schemaSnapshot: (connId, database) => call('schema_snapshot', { connId, database }),
   runQuery: (request) => call('run_query', { request }),
   cancelQuery: (queryId) => call('cancel_query', { queryId }),
@@ -36,4 +51,10 @@ export const tauriBackend: Backend = {
   guardCheck: (engine, sql) => call('guard_check', { engine, sql }),
   classifyWrite: (engine, sql) => call('classify_write', { engine, sql }),
   runAiRead: (connId, database, sql) => call('run_ai_read', { connId, database, sql }),
+  getAiSettings: () => call('get_ai_settings'),
+  saveAiSettings: (settings) => call('save_ai_settings', { settings }),
+  setAiKey: (key) => call('set_ai_key', { key }),
+  testAi: (settings, key) => call('test_ai', { settings, key }),
+  chatSend,
+  chatCancel: (chatId) => call('chat_cancel', { chatId }),
 };

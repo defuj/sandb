@@ -22,6 +22,14 @@ pub enum ErrorCode {
     ReadOnlyViolation,
     /// The editor refused SQL on a read-only connection before it reached the database.
     ConnectionReadOnly,
+    /// The AI server does not list the configured model.
+    ModelNotFound,
+    /// The AI server answered with an HTTP error other than 401/403.
+    AiUpstream,
+    /// The AI server broke the OpenAI protocol (bad JSON, a stream that ends early, too many steps).
+    AiProtocol,
+    /// The assistant proposed a write, but write mode is off or the connection is read-only.
+    WriteBlocked,
     Internal,
 }
 
@@ -32,6 +40,10 @@ pub struct AppError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The server's own error code when `message` is the server's text, e.g. `SQLSTATE 22P02`
+    /// or `MySQL error 1366`. Not serialized: it lets a caller name the error without the text.
+    #[serde(skip)]
+    pub server_code: Option<String>,
 }
 
 impl AppError {
@@ -40,6 +52,7 @@ impl AppError {
             code,
             message: message.into(),
             detail: None,
+            server_code: None,
         }
     }
 
@@ -94,7 +107,9 @@ impl From<sqlx::Error> for AppError {
                         "Authentication failed. Check the user and password.",
                     )
                 } else {
-                    AppError::new(ErrorCode::Database, db.message().to_string())
+                    let mut e = AppError::new(ErrorCode::Database, db.message().to_string());
+                    e.server_code = server_code_label(&**db, mysql_number);
+                    e
                 }
                 .with_detail(detail)
             }
@@ -113,6 +128,22 @@ impl From<sqlx::Error> for AppError {
             }
             _ => AppError::internal("Unexpected database error").with_detail(detail),
         }
+    }
+}
+
+/// `MySQL error 1366`, `SQLite error 787`, else `SQLSTATE 22P02`; `None` without a code.
+fn server_code_label(
+    db: &(dyn sqlx::error::DatabaseError + 'static),
+    mysql_number: Option<u16>,
+) -> Option<String> {
+    if let Some(n) = mysql_number {
+        return Some(format!("MySQL error {n}"));
+    }
+    let code = db.code()?;
+    if db.try_downcast_ref::<sqlx::sqlite::SqliteError>().is_some() {
+        Some(format!("SQLite error {code}"))
+    } else {
+        Some(format!("SQLSTATE {code}"))
     }
 }
 
@@ -154,6 +185,10 @@ mod tests {
             (ErrorCode::GuardRejected, "guard_rejected"),
             (ErrorCode::ReadOnlyViolation, "read_only_violation"),
             (ErrorCode::ConnectionReadOnly, "connection_read_only"),
+            (ErrorCode::ModelNotFound, "model_not_found"),
+            (ErrorCode::AiUpstream, "ai_upstream"),
+            (ErrorCode::AiProtocol, "ai_protocol"),
+            (ErrorCode::WriteBlocked, "write_blocked"),
             (ErrorCode::Internal, "internal"),
         ];
         for (c, s) in codes {
@@ -223,6 +258,8 @@ mod tests {
         let e = AppError::from(other);
         assert_eq!(e.code, ErrorCode::Database);
         assert_eq!(e.message, "fake server error");
+        assert_eq!(e.server_code.as_deref(), Some("SQLSTATE 3D000"));
+        assert_eq!(AppError::invalid("x").server_code, None);
 
         let cfg = sqlx::Error::Configuration("bad".into());
         assert_eq!(AppError::from(cfg).code, ErrorCode::InvalidInput);

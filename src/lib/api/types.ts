@@ -66,6 +66,51 @@ export interface ColumnInfo {
   pkOrdinal?: number;
 }
 
+export interface IndexInfo {
+  name: string;
+  /** Column names in index order; expressions (PG/SQLite expression indexes) appear as their SQL text. */
+  columns: string[];
+  unique: boolean;
+  /** The index backs the primary key. */
+  primary: boolean;
+  /** Access method, e.g. btree, hash, gin (PG); BTREE/FULLTEXT (MySQL); absent on SQLite. */
+  method?: string;
+  /** Full CREATE INDEX text when the engine gives it (PG pg_get_indexdef, SQLite sqlite_master.sql); absent otherwise. */
+  definition?: string;
+}
+
+export interface ConstraintInfo {
+  name: string;
+  kind: 'primary' | 'unique' | 'check' | 'exclude';
+  columns: string[];
+  /** Check expression or PG pg_get_constraintdef text; absent when not available. */
+  definition?: string;
+}
+
+export interface ForeignKeyInfo {
+  name: string;
+  /** Referencing side. `schema` is PG only. */
+  schema?: string;
+  table: string;
+  columns: string[];
+  /** Referenced side. `refSchema` is PG only. */
+  refSchema?: string;
+  refTable: string;
+  refColumns: string[];
+  /** e.g. 'NO ACTION', 'CASCADE', 'SET NULL', 'RESTRICT', 'SET DEFAULT' (upper case, space separated). */
+  onUpdate: string;
+  onDelete: string;
+}
+
+export interface TableProperties {
+  indexes: IndexInfo[];
+  constraints: ConstraintInfo[];
+  /** Foreign keys this table declares (table = this table). */
+  foreignKeys: ForeignKeyInfo[];
+  /** Foreign keys in other tables that point at this table (refTable = this table). */
+  references: ForeignKeyInfo[];
+}
+
 export interface SnapshotTable {
   /** PG schema; absent on MySQL and SQLite. */
   schema?: string;
@@ -184,6 +229,64 @@ export interface AiReadResult {
   elapsedMs: number;
 }
 
+/** AI provider settings, stored in `settings.json`. The API key is stored apart, in the secret store. */
+export interface AiSettings {
+  provider: string;
+  /** OpenAI-compatible base URL, without a trailing `/`. */
+  baseUrl: string;
+  model: string;
+  /** `results`: query rows go to the model; `schema`: only column names and row counts. */
+  privacy: 'results' | 'schema';
+  maxRows: number;
+  timeoutSec: number;
+}
+
+/** The saved settings. The key itself never comes back; `hasKey` tells if one is stored. */
+export interface AiSettingsView extends AiSettings {
+  hasKey: boolean;
+}
+
+export interface AiTestResult {
+  latencyMs: number;
+  /** Number of models the server lists at `GET /models`. */
+  modelCount: number;
+}
+
+export interface ChatRequest {
+  chatId: string;
+  connId: string;
+  /** null: the connection's own database. */
+  database: string | null;
+  /** PG schema that `list_tables` and `describe_table` use by default; null: `public`. */
+  schema: string | null;
+  /** Earlier turns, oldest first, without `message`. */
+  history: { role: 'user' | 'assistant'; content: string }[];
+  message: string;
+  /** Write mode of the chat panel. `propose_write` also needs a connection that is not read-only. It never runs SQL. */
+  allowWrites: boolean;
+}
+
+/** One streamed step of a chat reply. Every stream ends with exactly one `done` or `error`. */
+export type ChatEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
+  | {
+      type: 'tool_result';
+      id: string;
+      ok: boolean;
+      /** Short text: "12 tables", "5 rows · 42 ms", or the error message. */
+      summary: string;
+      columns?: string[];
+      /** At most 50 rows, for this UI only. */
+      rows?: CellValue[][];
+      truncated?: boolean;
+      error?: AppErrorBody;
+    }
+  /** Sent before the matching `tool_result` when the proposed write is allowed. */
+  | { type: 'write_preview'; id: string; sql: string; info: WriteInfo }
+  | { type: 'error'; error: AppErrorBody }
+  | { type: 'done' };
+
 export type ErrorCode =
   | 'not_found'
   | 'invalid_input'
@@ -203,7 +306,15 @@ export type ErrorCode =
   | 'connection_read_only'
   | 'internal'
   /** Dev bridge only: missing or wrong bearer token. */
-  | 'unauthorized';
+  | 'unauthorized'
+  /** The AI server does not list the model in the settings (HTTP 422 in the bridge). */
+  | 'model_not_found'
+  /** The AI server answered with an error status; `detail` holds the start of the body (HTTP 502 in the bridge). */
+  | 'ai_upstream'
+  /** The AI server sent a reply that is not valid, or the reply used too many steps (HTTP 502 in the bridge). */
+  | 'ai_protocol'
+  /** `propose_write` was refused: write mode is off or the connection is read-only (HTTP 403 in the bridge). */
+  | 'write_blocked';
 
 export interface AppErrorBody {
   code: ErrorCode;
@@ -248,6 +359,8 @@ export interface Backend {
   listSchemas(connId: string, database: string): Promise<string[]>;
   listTables(connId: string, database: string, schema: string | null): Promise<TableInfo[]>;
   listColumns(connId: string, database: string, schema: string | null, table: string): Promise<ColumnInfo[]>;
+  /** Indexes, constraints, foreign keys and incoming references of one table. A view yields empty lists; an unknown table fails with `not_found`. */
+  tableProperties(connId: string, database: string, schema: string | null, table: string): Promise<TableProperties>;
   schemaSnapshot(connId: string, database: string): Promise<SchemaSnapshot>;
   /** Runs every statement in `sql` on one connection; fails with code `cancelled` after `cancelQuery`. */
   runQuery(request: RunRequest): Promise<QueryRun>;
@@ -276,4 +389,15 @@ export interface Backend {
   classifyWrite(engine: Engine, sql: string): Promise<WriteInfo>;
   /** AI read path: guard, then a read-only session with the default limits. Fails with `guard_rejected`, `read_only_violation` or `timeout`. */
   runAiRead(connId: string, database: string | null, sql: string): Promise<AiReadResult>;
+  getAiSettings(): Promise<AiSettingsView>;
+  /** Fails with `invalid_input` for a URL that is not http(s), max rows outside 1–10,000 or a time limit outside 1–300 s. */
+  saveAiSettings(settings: AiSettings): Promise<AiSettingsView>;
+  /** null or an empty string deletes the stored key. */
+  setAiKey(key: string | null): Promise<void>;
+  /** Lists the models of `settings` (maybe not saved) and fails with `model_not_found` when `settings.model` is not among them. `key`: null uses the stored key; an empty string sends none. */
+  testAi(settings: AiSettings, key: string | null): Promise<AiTestResult>;
+  /** Streams one reply to `onEvent` and resolves after the terminal `done` or `error` event. */
+  chatSend(request: ChatRequest, onEvent: (e: ChatEvent) => void): Promise<void>;
+  /** Stops a running reply; it then ends with an `error` event of code `cancelled`. An unknown id is not an error. */
+  chatCancel(chatId: string): Promise<void>;
 }

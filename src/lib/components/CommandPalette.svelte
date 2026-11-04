@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { Search, FileCode, Play, PanelRight, Settings, ScrollText, SunMoon, Plus, Table2, Database } from '@lucide/svelte';
+  import { Search, FileCode, Play, PanelRight, PanelLeft, Settings, ScrollText, SunMoon, Plus, Table2, Database } from '@lucide/svelte';
   import { db, active, envDot, type Conn } from '../state.svelte';
 
   type Item = { id: string; group: string; label: string; icon?: typeof Search; dot?: string; env?: string; hint?: string; run: () => void };
@@ -11,6 +11,7 @@
     onfocuseditor,
     onrun,
     ontogglechat,
+    ontogglesidebar,
     onpage,
     ontoggletheme,
     onnewconnection,
@@ -22,6 +23,7 @@
     onfocuseditor: () => void;
     onrun: () => void;
     ontogglechat: () => void;
+    ontogglesidebar: () => void;
     onpage: (p: 'settings' | 'audit') => void;
     ontoggletheme: () => void;
     onnewconnection: () => void;
@@ -38,6 +40,7 @@
     { id: 'a-new', group: 'Actions', label: 'New query / focus editor', icon: FileCode, run: onfocuseditor },
     { id: 'a-run', group: 'Actions', label: 'Run query', icon: Play, hint: '⌘↵', run: onrun },
     { id: 'a-chat', group: 'Actions', label: 'Toggle AI chat', icon: PanelRight, run: ontogglechat },
+    { id: 'a-sidebar', group: 'Actions', label: 'Toggle sidebar', icon: PanelLeft, run: ontogglesidebar },
     { id: 'a-settings', group: 'Actions', label: 'Open Settings', icon: Settings, run: () => onpage('settings') },
     { id: 'a-audit', group: 'Actions', label: 'Open Audit log', icon: ScrollText, run: () => onpage('audit') },
     { id: 'a-theme', group: 'Actions', label: 'Toggle theme', icon: SunMoon, run: ontoggletheme },

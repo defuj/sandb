@@ -1,4 +1,4 @@
-import { api, ApiError, type Connection, type Engine, type Env } from './api';
+import { api, ApiError, type AiSettings, type Connection, type Engine, type Env } from './api';
 import { seedConnections } from './api/mock';
 import { tabs, activeTab, setTabConn } from './tabs.svelte';
 
@@ -37,10 +37,14 @@ export const envTag: Record<Env, string> = {
 export const ui = $state({
   dark: false,
   chatOpen: true,
+  /** Assistant panel width in px. */
+  chatWidth: 340,
   page: 'query' as 'query' | 'settings' | 'audit',
   theme: 'light' as 'light' | 'dark' | 'system',
   /** Sidebar width in px; the title bar uses it too, so the tabs stay in line with the main card. */
   sidebarWidth: 224,
+  /** False hides the sidebar; the main card then starts at the window edge. */
+  sidebarOpen: true,
   /** Editor height as a fraction of the main card; the results grid takes the rest. */
   editorSplit: 0.34,
   /** False hides the results grid; the editor then fills the card. */
@@ -66,6 +70,8 @@ export const ai = $state({
   privacy: 'results' as 'results' | 'schema',
   maxRows: 500,
   timeoutSec: 15,
+  /** A key is stored. The stored key never comes back to the UI; `apiKey` holds only what the user typed. */
+  hasKey: false,
 });
 
 // Mock mode starts with the seed synchronously, exactly like the prototype; real backends load on start.
@@ -91,6 +97,101 @@ export async function loadConnections() {
   } finally {
     db.loading = false;
   }
+}
+
+/** The saved AI settings fill `ai`. The mock keeps the defaults. */
+export async function loadAiSettings() {
+  if (isMock) return;
+  try {
+    const s = await api.getAiSettings();
+    ai.provider = s.provider in providers ? (s.provider as Provider) : 'custom';
+    ai.baseUrl = s.baseUrl;
+    ai.model = s.model;
+    ai.privacy = s.privacy;
+    ai.maxRows = s.maxRows;
+    ai.timeoutSec = s.timeoutSec;
+    ai.hasKey = s.hasKey;
+  } catch (e) {
+    console.warn('AI settings were not loaded; using the defaults.', ApiError.from(e).message);
+  }
+}
+
+/** The AI settings without the key, as the backend takes them. */
+export const aiSettings = (): AiSettings => ({ provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model, privacy: ai.privacy, maxRows: ai.maxRows, timeoutSec: ai.timeoutSec });
+
+// Edits are saved shortly after the user stops typing. One queue keeps the writes in order.
+const AI_SAVE_MS = 500;
+let settingsDirty = false;
+let keyDirty = false;
+let settingsTimer: ReturnType<typeof setTimeout> | undefined;
+let keyTimer: ReturnType<typeof setTimeout> | undefined;
+let aiQueue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(f: () => Promise<T>): Promise<T> {
+  const p = aiQueue.then(f);
+  aiQueue = p.catch(() => {});
+  return p;
+}
+
+async function writeSettings() {
+  clearTimeout(settingsTimer);
+  if (!settingsDirty) return;
+  settingsDirty = false;
+  try {
+    ai.hasKey = (await api.saveAiSettings(aiSettings())).hasKey;
+  } catch (e) {
+    settingsDirty = true;
+    throw e;
+  }
+}
+
+// An empty input keeps the stored key; only removeAiKey deletes it.
+async function writeKey() {
+  clearTimeout(keyTimer);
+  if (!keyDirty) return;
+  keyDirty = false;
+  const key = ai.apiKey.trim();
+  if (!key) return;
+  try {
+    await api.setAiKey(key);
+    ai.hasKey = true;
+  } catch (e) {
+    keyDirty = true;
+    throw e;
+  }
+}
+
+const warnUnsaved = (e: unknown) => console.warn('AI settings were not saved.', ApiError.from(e).message);
+
+/** Saves the AI settings (not the key) after a short pause. */
+export function saveAiSoon() {
+  settingsDirty = true;
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(() => enqueue(writeSettings).catch(warnUnsaved), AI_SAVE_MS);
+}
+
+/** Stores the typed key after a short pause. */
+export function saveAiKeySoon() {
+  keyDirty = true;
+  clearTimeout(keyTimer);
+  keyTimer = setTimeout(() => enqueue(writeKey).catch(warnUnsaved), AI_SAVE_MS);
+}
+
+/** Writes pending settings and key now. Fails with the backend error, for example `invalid_input`. */
+export function flushAi(): Promise<void> {
+  return enqueue(async () => {
+    await writeSettings();
+    await writeKey();
+  });
+}
+
+/** Deletes the stored key and clears the input. */
+export async function removeAiKey() {
+  keyDirty = false;
+  clearTimeout(keyTimer);
+  ai.apiKey = '';
+  await enqueue(() => api.setAiKey(null));
+  ai.hasKey = false;
 }
 
 // Stands in while there are no connections, so views that read active() keep working.

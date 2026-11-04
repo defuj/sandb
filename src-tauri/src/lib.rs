@@ -3,13 +3,16 @@ pub mod core;
 
 use std::path::PathBuf;
 
-use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::menu::{Menu, MenuItem, MenuItemKind, WINDOW_SUBMENU_ID};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 
 use crate::core::secrets::FileStore;
 use crate::core::state::AppState;
 
 const QUIT_ID: &str = "sandb-quit";
+const CLOSE_TAB_ID: &str = "sandb-close-tab";
+const CLOSE_WINDOW_ID: &str = "sandb-close-window";
 
 fn has_pending<R: Runtime, M: Manager<R>>(m: &M) -> bool {
     m.try_state::<AppState>()
@@ -29,6 +32,38 @@ fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             first.remove_at(items.len() - 1)?;
             let quit = MenuItem::with_id(app, QUIT_ID, "Quit sandb", true, Some("CmdOrCtrl+Q"))?;
             first.append(&quit)?;
+        }
+    }
+    // ⌘W / Ctrl+W closes the active query tab, as in a browser. The default menu binds it to Close
+    // Window (File menu, and the Window menu on macOS), which would close the whole app window.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        // File follows the app menu on macOS and comes first on Windows. Its first item is Close Window.
+        let file_at = if cfg!(target_os = "macos") { 1 } else { 0 };
+        if let Some(MenuItemKind::Submenu(file)) = menu.items()?.into_iter().nth(file_at)
+            && let Some(MenuItemKind::Predefined(_)) = file.items()?.first()
+        {
+            file.remove_at(0)?;
+            let close_tab =
+                MenuItem::with_id(app, CLOSE_TAB_ID, "Close Tab", true, Some("CmdOrCtrl+W"))?;
+            file.insert(&close_tab, 0)?;
+        }
+    }
+    // The Window menu's Close Window moves to ⇧⌘W. It goes through the same close request, so the
+    // pending-transaction prompt still applies.
+    #[cfg(target_os = "macos")]
+    if let Some(MenuItemKind::Submenu(window)) = menu.get(WINDOW_SUBMENU_ID) {
+        let items = window.items()?;
+        if let Some(MenuItemKind::Predefined(_)) = items.last() {
+            window.remove_at(items.len() - 1)?;
+            let close = MenuItem::with_id(
+                app,
+                CLOSE_WINDOW_ID,
+                "Close Window",
+                true,
+                Some("CmdOrCtrl+Shift+W"),
+            )?;
+            window.append(&close)?;
         }
     }
     Ok(menu)
@@ -62,6 +97,15 @@ pub fn run() {
                 let _ = window.emit("sandb://quit-requested", ());
             }
         })
+        // A reload of the main page drops the chat streams it listened to; stop their runs.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started
+                && webview.label() == "main"
+                && let Some(state) = webview.try_state::<AppState>()
+            {
+                state.chats.cancel_all();
+            }
+        })
         .on_menu_event(|app, event| {
             if event.id() == QUIT_ID {
                 if has_pending(app) {
@@ -69,6 +113,12 @@ pub fn run() {
                 } else {
                     app.exit(0);
                 }
+            } else if event.id() == CLOSE_TAB_ID {
+                let _ = app.emit("sandb://close-tab", ());
+            } else if event.id() == CLOSE_WINDOW_ID
+                && let Some(w) = app.get_webview_window("main")
+            {
+                let _ = w.close();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -82,6 +132,7 @@ pub fn run() {
             commands::list_schemas,
             commands::list_tables,
             commands::list_columns,
+            commands::table_properties,
             commands::schema_snapshot,
             commands::table_ddl,
             commands::export_table_sql,
@@ -97,6 +148,12 @@ pub fn run() {
             commands::guard_check,
             commands::classify_write,
             commands::run_ai_read,
+            commands::get_ai_settings,
+            commands::save_ai_settings,
+            commands::set_ai_key,
+            commands::test_ai,
+            commands::chat_send,
+            commands::chat_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

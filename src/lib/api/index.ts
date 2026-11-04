@@ -18,6 +18,7 @@ function bridgeBackend(): Backend {
     listSchemas: (connId, database) => load.then((b) => b.listSchemas(connId, database)),
     listTables: (connId, database, schema) => load.then((b) => b.listTables(connId, database, schema)),
     listColumns: (connId, database, schema, table) => load.then((b) => b.listColumns(connId, database, schema, table)),
+    tableProperties: (connId, database, schema, table) => load.then((b) => b.tableProperties(connId, database, schema, table)),
     schemaSnapshot: (connId, database) => load.then((b) => b.schemaSnapshot(connId, database)),
     runQuery: (request) => load.then((b) => b.runQuery(request)),
     cancelQuery: (queryId) => load.then((b) => b.cancelQuery(queryId)),
@@ -33,6 +34,12 @@ function bridgeBackend(): Backend {
     guardCheck: (engine, sql) => load.then((b) => b.guardCheck(engine, sql)),
     classifyWrite: (engine, sql) => load.then((b) => b.classifyWrite(engine, sql)),
     runAiRead: (connId, database, sql) => load.then((b) => b.runAiRead(connId, database, sql)),
+    getAiSettings: () => load.then((b) => b.getAiSettings()),
+    saveAiSettings: (settings) => load.then((b) => b.saveAiSettings(settings)),
+    setAiKey: (key) => load.then((b) => b.setAiKey(key)),
+    testAi: (settings, key) => load.then((b) => b.testAi(settings, key)),
+    chatSend: (request, onEvent) => load.then((b) => b.chatSend(request, onEvent)),
+    chatCancel: (chatId) => load.then((b) => b.chatCancel(chatId)),
   };
 }
 

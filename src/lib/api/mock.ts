@@ -1,4 +1,4 @@
-import { ApiError, type Backend, type Connection, type ConnectionInput, type Engine, type StatementResult, type CellValue, type GuardCheck, type WriteInfo } from './types';
+import { ApiError, type Backend, type Connection, type ConnectionInput, type Engine, type StatementResult, type CellValue, type GuardCheck, type WriteInfo, type ForeignKeyInfo, type TableProperties, type AiSettings } from './types';
 import { schemas, nsOf, pkOf, colType, runMock, statementKind } from '../mock';
 
 // In-memory backend: the prototype behaviour, used when there is neither Tauri nor the dev bridge.
@@ -91,6 +91,53 @@ function mockClassifyWrite(sql: string): WriteInfo {
   return info;
 }
 
+// Foreign keys guessed from names: `<x>_id` points at `<x>s.id` or `<x>.id` in the same mock schema (and PG namespace).
+function mockForeignKeys(c: Connection): ForeignKeyInfo[] {
+  const s = mockSchema(c);
+  const pg = c.engine === 'pg';
+  const fks: ForeignKeyInfo[] = [];
+  for (const [table, cols] of Object.entries(s)) {
+    for (const col of cols) {
+      const m = /^(.+)_id$/.exec(col);
+      if (!m) continue;
+      const ref = [`${m[1]}s`, m[1]].find((t) => s[t] && nsOf(c.engine, t) === nsOf(c.engine, table));
+      if (!ref) continue;
+      fks.push({
+        name: `${table}_${col}_fkey`,
+        schema: pg ? nsOf(c.engine, table) : undefined,
+        table,
+        columns: [col],
+        refSchema: pg ? nsOf(c.engine, ref) : undefined,
+        refTable: ref,
+        refColumns: ['id'],
+        onUpdate: 'NO ACTION',
+        onDelete: 'NO ACTION',
+      });
+    }
+  }
+  return fks;
+}
+
+function mockProperties(c: Connection, table: string): TableProperties {
+  const pk = pkOf(table);
+  const fks = mockForeignKeys(c);
+  const foreignKeys = fks.filter((f) => f.table === table);
+  return {
+    indexes: [
+      { name: `${table}_pkey`, columns: pk, unique: true, primary: true, method: 'btree' },
+      ...foreignKeys.map((f) => ({ name: `idx_${table}_${f.columns[0]}`, columns: f.columns, unique: false, primary: false, method: 'btree' })),
+    ],
+    constraints: [{ name: `${table}_pkey`, kind: 'primary', columns: pk }],
+    foreignKeys,
+    references: fks.filter((f) => f.refTable === table),
+  };
+}
+
+// The demo build keeps the AI settings in memory and never calls a model.
+let aiSettings: AiSettings = { provider: 'ollama', baseUrl: 'http://localhost:11434/v1', model: 'llama3.1:8b', privacy: 'results', maxRows: 500, timeoutSec: 15 };
+let aiKey = '';
+const noAi = () => new ApiError({ code: 'invalid_input', message: 'The demo build has no AI backend. Use the desktop app or the dev bridge.' });
+
 export const mockBackend: Backend = {
   kind: 'mock',
   async listConnections() {
@@ -145,6 +192,11 @@ export const mockBackend: Backend = {
     if (!s[table]) throw new ApiError({ code: 'not_found', message: `Table ${table} not found` });
     const pk = pkOf(table);
     return s[table].map((name) => ({ name, dataType: colType(s, table, name), nullable: !pk.includes(name), isPk: pk.includes(name), pkOrdinal: pk.includes(name) ? pk.indexOf(name) + 1 : undefined }));
+  },
+  async tableProperties(connId, _database, _schema, table) {
+    const c = find(connId);
+    if (!mockSchema(c)[table]) throw new ApiError({ code: 'not_found', message: `Table ${table} not found` });
+    return mockProperties(c, table);
   },
   async schemaSnapshot(connId, database) {
     const c = find(connId);
@@ -247,4 +299,21 @@ export const mockBackend: Backend = {
     const s = run.statements[0];
     return { columns: s.columns, rows: s.rows, truncated: s.truncated, elapsedMs: s.elapsedMs };
   },
+  async getAiSettings() {
+    return { ...aiSettings, hasKey: !!aiKey };
+  },
+  async saveAiSettings(settings) {
+    aiSettings = { ...settings };
+    return { ...aiSettings, hasKey: !!aiKey };
+  },
+  async setAiKey(key) {
+    aiKey = key ?? '';
+  },
+  async testAi() {
+    throw noAi();
+  },
+  async chatSend() {
+    throw noAi();
+  },
+  async chatCancel() {},
 };

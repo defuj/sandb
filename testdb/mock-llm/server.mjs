@@ -20,6 +20,10 @@ const keywords = ['error', 'slow', 'bypass', 'write', 'describe', 'count', 'list
 let seq = 0;
 const nextId = (p) => `${p}_${Date.now().toString(36)}${(++seq).toString(36)}`;
 
+// Parsed bodies of the last POST /v1/chat/completions requests, oldest first, for GET /_requests.
+const MAX_RECORDED = 100;
+const recorded = [];
+
 const textOf = (content) =>
   typeof content === 'string'
     ? content
@@ -114,6 +118,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/v1/models') {
     return send(res, 200, { object: 'list', data: [{ id: MODEL, object: 'model', created: 0, owned_by: 'sandb-test' }] });
   }
+  if (req.method === 'GET' && url.pathname === '/_requests') return send(res, 200, recorded);
   if (req.method !== 'POST' || url.pathname !== '/v1/chat/completions') {
     return send(res, 404, { error: { message: `no route ${req.method} ${url.pathname}`, type: 'not_found' } });
   }
@@ -127,6 +132,8 @@ const server = http.createServer(async (req, res) => {
   } catch {
     return send(res, 400, { error: { message: 'invalid JSON body', type: 'invalid_request_error' } });
   }
+  recorded.push(body);
+  if (recorded.length > MAX_RECORDED) recorded.shift();
 
   const p = plan(body);
   if (p.kind === 'error') {

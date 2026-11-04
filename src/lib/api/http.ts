@@ -1,4 +1,4 @@
-import { ApiError, type Backend } from './types';
+import { ApiError, type Backend, type ChatEvent, type ChatRequest } from './types';
 
 // Dev-only transport to the Rust bridge (`pnpm bridge`). The bridge only allows the origin http://localhost:5199.
 const base = ((import.meta.env.VITE_BRIDGE_URL as string | undefined) || 'http://127.0.0.1:58123').replace(/\/+$/, '');
@@ -21,6 +21,56 @@ async function call<T>(cmd: string, args: Record<string, unknown> = {}, keepaliv
   return body as T;
 }
 
+// The bridge answers with `text/event-stream`: one `data: <ChatEvent JSON>` line per event, events split by a blank line.
+async function chatSend(request: ChatRequest, onEvent: (e: ChatEvent) => void): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/api/chat_send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+      body: JSON.stringify({ request }),
+    });
+  } catch (e) {
+    throw new ApiError({ code: 'io', message: 'Cannot reach the dev bridge', detail: `${base}: ${e instanceof Error ? e.message : e}` });
+  }
+  if (!res.ok || !res.body) {
+    const body: unknown = await res.json().catch(() => null);
+    throw ApiError.from(body ?? { code: 'internal', message: `Bridge returned HTTP ${res.status}` });
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  let ended = false;
+  const line = (l: string) => {
+    if (!l.startsWith('data:')) return;
+    let e: ChatEvent;
+    try {
+      e = JSON.parse(l.slice(5).trim()) as ChatEvent;
+    } catch {
+      throw new ApiError({ code: 'ai_protocol', message: 'The dev bridge sent an event that is not valid JSON' });
+    }
+    onEvent(e);
+    if (e.type === 'done' || e.type === 'error') ended = true;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? '';
+      for (const l of lines) line(l);
+    }
+    line(buf);
+  } catch (e) {
+    reader.cancel().catch(() => {});
+    if (e instanceof ApiError) throw e;
+    throw new ApiError({ code: 'io', message: 'The connection to the dev bridge stopped', detail: e instanceof Error ? e.message : String(e) });
+  } finally {
+    reader.releaseLock();
+  }
+  if (!ended) throw new ApiError({ code: 'ai_protocol', message: 'The reply stopped before it was complete' });
+}
+
 export const httpBackend: Backend = {
   kind: 'bridge',
   listConnections: () => call('list_connections'),
@@ -33,6 +83,7 @@ export const httpBackend: Backend = {
   listSchemas: (connId, database) => call('list_schemas', { connId, database }),
   listTables: (connId, database, schema) => call('list_tables', { connId, database, schema }),
   listColumns: (connId, database, schema, table) => call('list_columns', { connId, database, schema, table }),
+  tableProperties: (connId, database, schema, table) => call('table_properties', { connId, database, schema, table }),
   schemaSnapshot: (connId, database) => call('schema_snapshot', { connId, database }),
   runQuery: (request) => call('run_query', { request }),
   cancelQuery: (queryId) => call('cancel_query', { queryId }),
@@ -47,6 +98,12 @@ export const httpBackend: Backend = {
   guardCheck: (engine, sql) => call('guard_check', { engine, sql }),
   classifyWrite: (engine, sql) => call('classify_write', { engine, sql }),
   runAiRead: (connId, database, sql) => call('run_ai_read', { connId, database, sql }),
+  getAiSettings: () => call('get_ai_settings'),
+  saveAiSettings: (settings) => call('save_ai_settings', { settings }),
+  setAiKey: (key) => call('set_ai_key', { key }),
+  testAi: (settings, key) => call('test_ai', { settings, key }),
+  chatSend,
+  chatCancel: (chatId) => call('chat_cancel', { chatId }),
   exportCsv: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' })),
   tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
   exportTableSql: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' })),

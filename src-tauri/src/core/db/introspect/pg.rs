@@ -1,9 +1,11 @@
 //! PostgreSQL catalogs. Text casts keep decoding independent of catalog column types.
 
 use sqlx::PgPool;
+use sqlx::postgres::types::Oid;
 
 use super::{
-    ColumnInfo, SNAPSHOT_MAX_COLUMNS, SNAPSHOT_MAX_TABLES, SnapRow, SnapTable, TableInfo, TableKind,
+    ColumnInfo, ConstraintInfo, ConstraintKind, ForeignKeyInfo, IndexInfo, SNAPSHOT_MAX_COLUMNS,
+    SNAPSHOT_MAX_TABLES, SnapRow, SnapTable, TableInfo, TableKind, TableProperties,
 };
 use crate::core::error::AppError;
 
@@ -90,6 +92,175 @@ pub async fn columns(p: &PgPool, schema: &str, table: &str) -> Result<Vec<Column
         .collect())
 }
 
+/// `pg_constraint.confupdtype` / `confdeltype` as the SQL action.
+fn fk_action(code: &str) -> String {
+    match code {
+        "r" => "RESTRICT",
+        "c" => "CASCADE",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        _ => "NO ACTION",
+    }
+    .to_string()
+}
+
+/// name, unique, primary, access method, definition, columns (expressions as their text).
+type IndexRow = (String, bool, bool, String, String, Vec<String>);
+/// name, contype, columns, definition.
+type ConstraintRow = (String, String, Vec<String>, String);
+/// name, schema, table, columns, ref schema, ref table, ref columns, on update, on delete,
+/// declared by this table, references this table.
+type ForeignKeyRow = (
+    String,
+    String,
+    String,
+    Vec<String>,
+    String,
+    String,
+    Vec<String>,
+    String,
+    String,
+    bool,
+    bool,
+);
+
+/// `None` when `schema.table` does not exist.
+pub async fn properties(
+    p: &PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<TableProperties>, AppError> {
+    let oid: Option<Oid> = sqlx::query_scalar(
+        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'f', 'v', 'm')",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_optional(p)
+    .await?;
+    let Some(oid) = oid else {
+        return Ok(None);
+    };
+
+    let indexes: Vec<IndexRow> = sqlx::query_as(
+        "SELECT ic.relname::text, i.indisunique, i.indisprimary, am.amname::text, \
+           pg_get_indexdef(i.indexrelid), \
+           ARRAY(SELECT CASE WHEN k.attnum = 0 \
+                   THEN pg_get_indexdef(i.indexrelid, k.ord::int, true) \
+                   ELSE a.attname::text END \
+                 FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+                 LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                 ORDER BY k.ord) \
+         FROM pg_index i \
+         JOIN pg_class ic ON ic.oid = i.indexrelid \
+         JOIN pg_am am ON am.oid = ic.relam \
+         WHERE i.indrelid = $1 \
+         ORDER BY i.indisprimary DESC, ic.relname",
+    )
+    .bind(oid)
+    .fetch_all(p)
+    .await?;
+
+    let constraints: Vec<ConstraintRow> = sqlx::query_as(
+        "SELECT co.conname::text, co.contype::text, \
+           ARRAY(SELECT a.attname::text \
+                 FROM unnest(co.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = co.conrelid AND a.attnum = k.attnum \
+                 ORDER BY k.ord), \
+           pg_get_constraintdef(co.oid, true) \
+         FROM pg_constraint co \
+         WHERE co.conrelid = $1 AND co.contype IN ('p', 'u', 'c', 'x') \
+         ORDER BY CASE co.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'x' THEN 2 ELSE 3 END, \
+           co.conname",
+    )
+    .bind(oid)
+    .fetch_all(p)
+    .await?;
+
+    let fks: Vec<ForeignKeyRow> = sqlx::query_as(
+        "SELECT co.conname::text, n.nspname::text, c.relname::text, \
+           ARRAY(SELECT a.attname::text \
+                 FROM unnest(co.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = co.conrelid AND a.attnum = k.attnum \
+                 ORDER BY k.ord), \
+           rn.nspname::text, rc.relname::text, \
+           ARRAY(SELECT a.attname::text \
+                 FROM unnest(co.confkey) WITH ORDINALITY AS k(attnum, ord) \
+                 JOIN pg_attribute a ON a.attrelid = co.confrelid AND a.attnum = k.attnum \
+                 ORDER BY k.ord), \
+           co.confupdtype::text, co.confdeltype::text, \
+           co.conrelid = $1, co.confrelid = $1 \
+         FROM pg_constraint co \
+         JOIN pg_class c ON c.oid = co.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_class rc ON rc.oid = co.confrelid \
+         JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+         WHERE co.contype = 'f' AND (co.conrelid = $1 OR co.confrelid = $1) \
+         ORDER BY n.nspname, c.relname, co.conname",
+    )
+    .bind(oid)
+    .fetch_all(p)
+    .await?;
+
+    let mut props = TableProperties {
+        indexes: indexes
+            .into_iter()
+            .map(
+                |(name, unique, primary, method, definition, columns)| IndexInfo {
+                    name,
+                    columns,
+                    unique,
+                    primary,
+                    method: Some(method),
+                    definition: Some(definition),
+                },
+            )
+            .collect(),
+        constraints: constraints
+            .into_iter()
+            .filter_map(|(name, contype, columns, definition)| {
+                let kind = match contype.as_str() {
+                    "p" => ConstraintKind::Primary,
+                    "u" => ConstraintKind::Unique,
+                    "c" => ConstraintKind::Check,
+                    "x" => ConstraintKind::Exclude,
+                    _ => return None,
+                };
+                Some(ConstraintInfo {
+                    name,
+                    kind,
+                    columns,
+                    definition: Some(definition),
+                })
+            })
+            .collect(),
+        ..TableProperties::default()
+    };
+    for (name, sch, tbl, cols, ref_sch, ref_tbl, ref_cols, upd, del, outgoing, incoming) in fks {
+        let fk = ForeignKeyInfo {
+            name,
+            schema: Some(sch),
+            table: tbl,
+            columns: cols,
+            ref_schema: Some(ref_sch),
+            ref_table: ref_tbl,
+            ref_columns: ref_cols,
+            on_update: fk_action(&upd),
+            on_delete: fk_action(&del),
+        };
+        // A self-reference is both declared and referenced.
+        if outgoing && incoming {
+            props.foreign_keys.push(fk.clone());
+            props.references.push(fk);
+        } else if outgoing {
+            props.foreign_keys.push(fk);
+        } else {
+            props.references.push(fk);
+        }
+    }
+    Ok(Some(props))
+}
+
 pub async fn snapshot_tables(p: &PgPool) -> Result<Vec<SnapTable>, AppError> {
     let sql = format!(
         "SELECT n.nspname::text, c.relname::text, c.relkind::text \
@@ -133,4 +304,18 @@ pub async fn snapshot(p: &PgPool) -> Result<Vec<SnapRow>, AppError> {
             data_type,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_fk_action_codes() {
+        assert_eq!(fk_action("a"), "NO ACTION");
+        assert_eq!(fk_action("r"), "RESTRICT");
+        assert_eq!(fk_action("c"), "CASCADE");
+        assert_eq!(fk_action("n"), "SET NULL");
+        assert_eq!(fk_action("d"), "SET DEFAULT");
+    }
 }

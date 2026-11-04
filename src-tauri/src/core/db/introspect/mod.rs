@@ -1,5 +1,6 @@
 //! Lazy schema browsing: databases → schemas (PG only) → tables and views → columns, plus a
-//! capped snapshot for editor autocomplete.
+//! capped snapshot for editor autocomplete and the index/constraint/foreign key properties of
+//! one table.
 
 mod mysql;
 mod pg;
@@ -80,6 +81,73 @@ pub struct SchemaSnapshot {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInfo {
+    pub name: String,
+    /// Column names in index order; expressions appear as their SQL text.
+    pub columns: Vec<String>,
+    pub unique: bool,
+    /// The index backs the primary key.
+    pub primary: bool,
+    /// Access method (btree, hash, gin, … on PG; BTREE, FULLTEXT, … on MySQL); absent on SQLite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Full `CREATE INDEX` text when the engine gives it (PG, SQLite).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConstraintKind {
+    Primary,
+    Unique,
+    Check,
+    Exclude,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub kind: ConstraintKind,
+    pub columns: Vec<String>,
+    /// Check expression or PG `pg_get_constraintdef` text; absent when not available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    /// Referencing side. `schema` is PG only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table: String,
+    pub columns: Vec<String>,
+    /// Referenced side. `ref_schema` is PG only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    /// `NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL` or `SET DEFAULT`.
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableProperties {
+    pub indexes: Vec<IndexInfo>,
+    pub constraints: Vec<ConstraintInfo>,
+    /// Foreign keys this table declares.
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    /// Foreign keys of other tables (or self-references) that point at this table.
+    pub references: Vec<ForeignKeyInfo>,
+}
+
 /// One table or view, ordered as the engine lists them, at most `SNAPSHOT_MAX_TABLES + 1`.
 pub(crate) struct SnapTable {
     pub schema: Option<String>,
@@ -130,6 +198,25 @@ pub(crate) fn group_snapshot(
         tables,
         truncated,
     }
+}
+
+/// Folds rows that arrive sorted by key: a row whose key equals the previous row's extends that
+/// item with `push`; any other row starts a new item with `start`.
+pub(crate) fn fold_runs<R, K: PartialEq, T>(
+    rows: impl IntoIterator<Item = R>,
+    key: impl Fn(&R) -> K,
+    start: impl Fn(R) -> T,
+    push: impl Fn(&mut T, R),
+) -> Vec<T> {
+    let mut out: Vec<(K, T)> = Vec::new();
+    for row in rows {
+        let k = key(&row);
+        match out.last_mut() {
+            Some((last, item)) if *last == k => push(item, row),
+            _ => out.push((k, start(row))),
+        }
+    }
+    out.into_iter().map(|(_, item)| item).collect()
 }
 
 pub(crate) fn not_found_table(table: &str) -> AppError {
@@ -219,6 +306,23 @@ pub async fn schema_snapshot(
         database.to_string()
     };
     Ok(group_snapshot(db, tables, rows))
+}
+
+/// Indexes, constraints, declared foreign keys and incoming foreign keys of one table. `schema`
+/// is PG only (default `public`). A view yields whatever the engine reports, usually nothing.
+pub async fn table_properties(
+    state: &AppState,
+    conn_id: &str,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<TableProperties, AppError> {
+    let props = match connections::pool_for(state, conn_id, Some(database))? {
+        DbPool::Pg(p) => pg::properties(&p, schema.unwrap_or("public"), table).await?,
+        DbPool::MySql(p) => mysql::properties(&p, database, table).await?,
+        DbPool::Sqlite(p) => sqlite::properties(&p, table).await?,
+    };
+    props.ok_or_else(|| not_found_table(table))
 }
 
 #[cfg(test)]
@@ -312,6 +416,59 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"name": "id", "dataType": "integer", "nullable": false, "isPk": true, "pkOrdinal": 1})
+        );
+    }
+
+    #[test]
+    fn fold_runs_groups_consecutive_keys() {
+        let rows = vec![("a", 1), ("a", 2), ("b", 3), ("a", 4)];
+        let out = fold_runs(rows, |r| r.0, |r| (r.0, vec![r.1]), |t, r| t.1.push(r.1));
+        assert_eq!(out, vec![("a", vec![1, 2]), ("b", vec![3]), ("a", vec![4])]);
+        let empty: Vec<(&str, i32)> = vec![];
+        assert!(fold_runs(empty, |r| r.0, |r| r.1, |_, _| ()).is_empty());
+    }
+
+    #[test]
+    fn properties_json_shape() {
+        let p = TableProperties {
+            indexes: vec![IndexInfo {
+                name: "t_pkey".into(),
+                columns: vec!["id".into()],
+                unique: true,
+                primary: true,
+                method: None,
+                definition: None,
+            }],
+            constraints: vec![ConstraintInfo {
+                name: "t_pkey".into(),
+                kind: ConstraintKind::Primary,
+                columns: vec!["id".into()],
+                definition: None,
+            }],
+            foreign_keys: vec![ForeignKeyInfo {
+                name: "t_u_fkey".into(),
+                schema: None,
+                table: "t".into(),
+                columns: vec!["u_id".into()],
+                ref_schema: Some("public".into()),
+                ref_table: "u".into(),
+                ref_columns: vec!["id".into()],
+                on_update: "NO ACTION".into(),
+                on_delete: "CASCADE".into(),
+            }],
+            references: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({
+                "indexes": [{"name": "t_pkey", "columns": ["id"], "unique": true, "primary": true}],
+                "constraints": [{"name": "t_pkey", "kind": "primary", "columns": ["id"]}],
+                "foreignKeys": [{
+                    "name": "t_u_fkey", "table": "t", "columns": ["u_id"], "refSchema": "public",
+                    "refTable": "u", "refColumns": ["id"], "onUpdate": "NO ACTION", "onDelete": "CASCADE"
+                }],
+                "references": []
+            })
         );
     }
 }

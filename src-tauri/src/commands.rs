@@ -1,12 +1,15 @@
 //! Thin `#[tauri::command]` adapters over the core.
 
+use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::core::ai::session::{self as chat, ChatEvent, ChatRequest};
+use crate::core::ai::settings::{self as ai_settings, AiSettings, AiSettingsView, AiTestResult};
 use crate::core::connections::{self, Connection, ConnectionInput, Engine, TestResult};
 use crate::core::db::dump::{self, TableExportRequest};
 use crate::core::db::export::{self, ExportRequest, ExportResult};
-use crate::core::db::introspect::{self, ColumnInfo, SchemaSnapshot, TableInfo};
+use crate::core::db::introspect::{self, ColumnInfo, SchemaSnapshot, TableInfo, TableProperties};
 use crate::core::db::query::{self, QueryProgress, QueryRun, RunRequest};
 use crate::core::db::readonly::{self, AiReadResult, ReadLimits};
 use crate::core::db::session::{self, TabStatus};
@@ -98,6 +101,18 @@ pub async fn list_columns(
     table: String,
 ) -> Res<Vec<ColumnInfo>> {
     introspect::list_columns(&state, &conn_id, &database, schema.as_deref(), &table).await
+}
+
+/// Indexes, constraints, foreign keys and incoming foreign keys of one table.
+#[tauri::command]
+pub async fn table_properties(
+    state: State<'_, AppState>,
+    conn_id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+) -> Res<TableProperties> {
+    introspect::table_properties(&state, &conn_id, &database, schema.as_deref(), &table).await
 }
 
 /// CREATE statements of one table or view (with its indexes, and triggers on SQLite).
@@ -202,6 +217,52 @@ pub async fn run_ai_read(
         ReadLimits::default(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_ai_settings(state: State<'_, AppState>) -> Res<AiSettingsView> {
+    ai_settings::get(&state)
+}
+
+#[tauri::command]
+pub async fn save_ai_settings(
+    state: State<'_, AppState>,
+    settings: AiSettings,
+) -> Res<AiSettingsView> {
+    ai_settings::save(&state, settings)
+}
+
+/// `null` or an empty key deletes the stored key.
+#[tauri::command]
+pub async fn set_ai_key(state: State<'_, AppState>, key: Option<String>) -> Res<()> {
+    ai_settings::set_key(&state, key)
+}
+
+/// Tests the given (maybe unsaved) settings. `key`: `null` uses the stored key, `""` sends none.
+#[tauri::command]
+pub async fn test_ai(
+    state: State<'_, AppState>,
+    settings: AiSettings,
+    key: Option<String>,
+) -> Res<AiTestResult> {
+    ai_settings::test(&state, settings, key).await
+}
+
+/// Streams the answer on `on_event`; it always ends with one `done` or `error` event.
+#[tauri::command]
+pub async fn chat_send(
+    state: State<'_, AppState>,
+    request: ChatRequest,
+    on_event: Channel<ChatEvent>,
+) -> Res<()> {
+    chat::run(&state, request, |e| on_event.send(e).is_ok()).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn chat_cancel(state: State<'_, AppState>, chat_id: String) -> Res<()> {
+    chat::cancel(&state, &chat_id);
+    Ok(())
 }
 
 /// Asks for the file in a native save dialog here, so the webview never chooses a path.

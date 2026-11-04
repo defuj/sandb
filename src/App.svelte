@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, CircleArrowUp, PanelBottom } from '@lucide/svelte';
-  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste } from '@lucide/svelte';
+  import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, PanelLeft, CircleArrowUp, PanelBottom } from '@lucide/svelte';
+  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste, ChevronUp, ChevronDown, Table2, Eye, RotateCw } from '@lucide/svelte';
   import { tick, untrack } from 'svelte';
   import { ui, db, toggleTheme, active, type Conn } from './lib/state.svelte';
   import { api, ApiError } from './lib/api';
@@ -11,7 +11,6 @@
   import SqlEditor from './lib/components/SqlEditor.svelte';
   import ResultsGrid from './lib/components/ResultsGrid.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
-  import WritePreview from './lib/components/WritePreview.svelte';
   import SafeguardDialog from './lib/components/SafeguardDialog.svelte';
   import SettingsPage from './lib/components/SettingsPage.svelte';
   import AuditPage from './lib/components/AuditPage.svelte';
@@ -19,11 +18,11 @@
   import DeleteConnectionDialog from './lib/components/DeleteConnectionDialog.svelte';
   import TargetBar from './lib/components/TargetBar.svelte';
   import TableDangerDialog from './lib/components/TableDangerDialog.svelte';
+  import TableProperties from './lib/components/TableProperties.svelte';
   import { qualified, displayName, selectSql, insertSql, dangerSql, type TableAction, type TableRef, type Danger } from './lib/tableActions';
   import { logQuery } from './lib/audit.svelte';
-  import { chat } from './lib/chat.svelte';
   import { confirmDiscard, resetEdits } from './lib/edits.svelte';
-  import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, type Tab } from './lib/tabs.svelte';
+  import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, type Tab } from './lib/tabs.svelte';
   import { manualCommit, refreshStatus, endTx, leaveSession, settlePending, txPrompt } from './lib/tx.svelte';
   import PendingTxDialog from './lib/components/PendingTxDialog.svelte';
   import { updates, checkForUpdates } from './lib/updates.svelte';
@@ -50,7 +49,7 @@
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         e.stopPropagation();
-        if (connDialog || connDelete || danger || guardTarget || chat.pending || txPrompt.ask) return;
+        if (connDialog || connDelete || danger || guardTarget || txPrompt.ask) return;
         paletteOpen = !paletteOpen;
       }
     };
@@ -62,6 +61,15 @@
     ui.page = 'query';
     await tick();
     editor?.focus();
+  }
+
+  // The WebView's own menu (Reload, Play All Animations) has no use in the app. Text fields and
+  // selected text keep it for Cut/Copy/Paste; dev builds keep it for Inspect Element.
+  function blockNativeMenu(e: MouseEvent) {
+    if (import.meta.env.DEV || e.defaultPrevented) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('input, textarea, [contenteditable="true"]') || !document.getSelection()?.isCollapsed) return;
+    e.preventDefault();
   }
 
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -79,6 +87,7 @@
   }
 
   const setSidebar = (w: number) => (ui.sidebarWidth = Math.round(clamp(w, 160, 480)));
+  const setChat = (w: number) => (ui.chatWidth = Math.round(clamp(w, 280, 640)));
   const setSplit = (px: number) => mainEl && (ui.editorSplit = clamp(px / mainEl.clientHeight, 0.1, 0.8));
 
   function resizeSidebar(e: PointerEvent) {
@@ -86,8 +95,15 @@
     drag(e, (dx) => setSidebar(w + dx));
   }
 
+  // The chat panel is on the right: a drag to the left makes it wider.
+  function resizeChat(e: PointerEvent) {
+    const w = ui.chatWidth;
+    drag(e, (dx) => setChat(w - dx));
+  }
+
   function resizeEditor(e: PointerEvent) {
     const h = ui.editorSplit * (mainEl?.clientHeight ?? 0);
+    restoreSplit = null;
     drag(e, (_, dy) => setSplit(h + dy));
   }
 
@@ -97,9 +113,27 @@
     if (d) { e.preventDefault(); setSidebar(ui.sidebarWidth + d); }
   }
 
+  function keyChat(e: KeyboardEvent) {
+    const d = { ArrowLeft: 16, ArrowRight: -16 }[e.key];
+    if (d) { e.preventDefault(); setChat(ui.chatWidth + d); }
+  }
+
   function keyEditor(e: KeyboardEvent) {
     const d = { ArrowUp: -16, ArrowDown: 16 }[e.key];
-    if (d && mainEl) { e.preventDefault(); setSplit(ui.editorSplit * mainEl.clientHeight + d); }
+    if (d && mainEl) { e.preventDefault(); restoreSplit = null; setSplit(ui.editorSplit * mainEl.clientHeight + d); }
+  }
+
+  // The sash arrows (as in DBeaver): one arrow moves the split to its limit; the other arrow then restores it.
+  let restoreSplit: number | null = null;
+  function sash(dir: 'up' | 'down') {
+    const target = dir === 'up' ? 0.1 : 0.8;
+    if (restoreSplit !== null && ui.editorSplit !== target) {
+      ui.editorSplit = restoreSplit;
+      restoreSplit = null;
+      return;
+    }
+    restoreSplit ??= ui.editorSplit;
+    ui.editorSplit = target;
   }
 
   async function switchConn(c: Conn) {
@@ -121,17 +155,29 @@
     openFirstTable();
   }
 
-  // One discard prompt covers both the connection switch and the table open.
-  async function openTableIn(c: Conn, t: string, at?: { database: string; schema: string | null }) {
+  // Double-click, ⌘-click or "View data" in the tree: a table tab with the table's data and properties.
+  // A tab that already shows the table comes to the front instead of a second one.
+  async function openTableView(c: Conn, t: TableRef) {
     if (!confirmDiscard()) return;
-    const cur = tab;
-    const moves = c.id !== cur.connId || (!!at && c.engine !== 'sqlite' && at.database !== database);
-    if (moves) {
-      if (!(await settlePending([cur], c.id !== cur.connId ? 'Switching the connection' : 'Switching the database'))) return;
-      leaveSession(cur);
+    const { tab: nt, created } = openTableTab(c, t);
+    ui.page = 'query';
+    await tick();
+    (tabStrip?.querySelector('[aria-current=page]') ?? tabStrip?.lastElementChild)?.scrollIntoView({ inline: 'nearest' });
+    if (created) loadTableData(nt);
+  }
+
+  /** Runs the table tab's SELECT; also the Refresh button of its Data view. */
+  function loadTableData(t: Tab) {
+    const ref = t.table!;
+    const c = db.connections.find((x) => x.id === t.connId)!;
+    if (isMock) {
+      t.query = `SELECT *\nFROM ${c.engine === 'pg' ? nsOf(c.engine, ref.name) + '.' : ''}${ref.name}`;
+    } else {
+      // No LIMIT: the run limit pages the rows, so "Load more" can fetch further.
+      t.query = `SELECT *\nFROM ${qualified(c.engine, ref)}`;
+      t.opened = { key: `${c.id}/${ref.database}/${ref.schema ?? ''}/${ref.name}`, sql: t.query };
     }
-    if (c.id !== cur.connId) setTabConn(cur, c);
-    openTable(t, at);
+    run(undefined, { sql: t.query });
   }
 
   // The tabs stay in the title bar on every page; picking one goes back to the query view.
@@ -207,6 +253,11 @@
   });
 
   const DEFAULT_LIMIT = 200;
+  /** The row count of a trailing `LIMIT n` (also `LIMIT n OFFSET m` and MySQL/SQLite `LIMIT m, n`), or null. */
+  function sqlLimit(sql: string): number | null {
+    const m = /\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+\d+)?\s*;?$/i.exec(sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim());
+    return m ? Number(m[2] ?? m[1]) : null;
+  }
   // Keyed by tab id; the Run/Cancel button and timer show the active tab's run only.
   // `script`: a file run; `done`/`total` come from the backend while it runs.
   const running = $state<Record<string, { id: string; started: number; script?: { name: string; done: number; total: number } }>>({});
@@ -231,7 +282,8 @@
     if (k === 'empty') return;
     const c = conn;
     const dbName = database;
-    const limit = again?.limit ?? DEFAULT_LIMIT;
+    // A LIMIT in the SQL wins over the default page size; the backend caps it at 100,000.
+    const limit = again?.limit ?? Math.max(sqlLimit(sql) ?? 0, DEFAULT_LIMIT);
     const id = crypto.randomUUID();
     const started = Date.now();
     running[t.id] = { id, started, script: pick?.script ? { name: pick.script, done: 0, total: 0 } : undefined };
@@ -344,6 +396,25 @@
       .then(({ listen }) =>
         listen('sandb://quit-requested', async () => {
           if (await settlePending(tabs.list, 'Quitting sandb', true)) api.quitApp().catch(() => {});
+        }),
+      )
+      .then((u) => (gone ? u() : (off = u)));
+    return () => {
+      gone = true;
+      off?.();
+    };
+  });
+
+  // Tauri: the menu's Close Tab (⌘W) closes the active tab. Ignored while a dialog or prompt is open.
+  $effect(() => {
+    if (api.kind !== 'tauri') return;
+    let off: (() => void) | undefined;
+    let gone = false;
+    import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen('sandb://close-tab', () => {
+          if (connDialog || connDelete || danger || guardTarget || txPrompt.ask || paletteOpen) return;
+          dropTab(tab);
         }),
       )
       .then((u) => (gone ? u() : (off = u)));
@@ -482,7 +553,7 @@
     try {
       switch (a) {
         case 'view':
-          return openTableIn(c, t.name, isMock ? undefined : { database: t.database, schema: t.schema });
+          return openTableView(c, t);
         case 'ddl':
           return openInNewTab(c, t, await api.tableDdl(c.id, t.database, t.schema, t.name));
         case 'select':
@@ -539,9 +610,10 @@
 <div class="flex h-full flex-col">
   <!-- Title bar. data-tauri-drag-region acts on the element itself only, so the empty strips drag the window and the buttons stay clickable. -->
   <div class="flex h-10 shrink-0 items-center px-2 select-none" data-tauri-drag-region>
-    <div class="flex h-full shrink-0 items-center gap-2 {inset ? 'pl-[76px]' : 'pl-2.5'}" style:width="{ui.sidebarWidth}px" data-tauri-drag-region>
+    <div class="flex h-full shrink-0 items-center gap-2 {inset ? 'pl-[76px]' : 'pl-2.5'}" style:width={ui.sidebarOpen ? `${ui.sidebarWidth}px` : undefined} data-tauri-drag-region>
       <Database size={14} strokeWidth={2.25} class="shrink-0 text-accent" />
       <span class="text-[13px] font-semibold tracking-[-0.01em]" data-tauri-drag-region>sandb</span>
+      <button class="btn btn-ghost ml-auto size-7 shrink-0 p-0" onclick={() => (ui.sidebarOpen = !ui.sidebarOpen)} title={ui.sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} aria-label="Toggle sidebar" aria-pressed={ui.sidebarOpen}><PanelLeft size={15} /></button>
     </div>
     {#if db.connections.length}
       <!-- The strip starts at the main card's left edge, so the first tab lines up with the card below. -->
@@ -555,7 +627,7 @@
               </span>
             {:else}
               <button class="flex h-full items-center gap-2 pl-2.5" aria-current={t.id === tab.id ? 'page' : undefined} onclick={() => pickTab(t.id)} ondblclick={() => (renaming = t.id)} title="Double-click to rename">
-                <FileCode size={13} class={on ? 'text-accent' : 'text-faint'} /> <span class="max-w-40 truncate">{t.title}</span>
+                {#if t.table}<Table2 size={13} class={on ? 'text-accent' : 'text-faint'} />{:else}<FileCode size={13} class={on ? 'text-accent' : 'text-faint'} />{/if} <span class="max-w-40 truncate">{t.title}</span>
                 {#if running[t.id] && !on}<LoaderCircle size={12} class="animate-spin text-faint" />{/if}
                 {#if t.status?.pending}<span class="size-1.5 rounded-full bg-amber-500" title="Transaction open"></span>{/if}
               </button>
@@ -574,8 +646,9 @@
   </div>
 
   <div class="relative flex min-h-0 flex-1 gap-2 px-2 pb-2">
-  <!-- Sidebar: sits on the canvas, so it reads as one piece with the title bar. -->
-  <aside class="flex shrink-0 flex-col overflow-hidden" style:width="{ui.sidebarWidth}px">
+  <!-- Sidebar: sits on the canvas, so it reads as one piece with the title bar.
+       Hidden, not unmounted, so the tree keeps its expanded nodes. -->
+  <aside class="flex shrink-0 flex-col overflow-hidden" style:width="{ui.sidebarWidth}px" hidden={!ui.sidebarOpen}>
     <div class="pt-1 pb-2">
       <button class="flex h-7 w-full items-center gap-2 rounded-md bg-hover px-2.5 text-muted hover:bg-active hover:text-ink" onclick={() => (paletteOpen = true)}>
         <Search size={13} /> <span class="flex-1 text-left">Quick search</span>
@@ -584,7 +657,7 @@
     </div>
 
     <nav class="-mx-1 flex-1 overflow-auto px-1 pb-2">
-      <ConnectionTree bind:this={tree} {selected} onopen={openTableIn} onnew={newConnection} onedit={editConnection} onduplicate={duplicateConnection} ondelete={(c) => (connDelete = c)} ontable={tableAction} />
+      <ConnectionTree bind:this={tree} {selected} onopen={openTableView} onnew={newConnection} onedit={editConnection} onduplicate={duplicateConnection} ondelete={(c) => (connDelete = c)} ontable={tableAction} />
     </nav>
 
     <div class="flex items-center gap-0.5 pt-1">
@@ -599,7 +672,7 @@
   <!-- Fills the gap between the sidebar and the card: the negative margins cancel its share of the flex gap.
        A focusable separator is the ARIA window-splitter pattern; Svelte counts every separator as static. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-  <div class="-mx-2 w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuenow={ui.sidebarWidth} aria-valuemin={160} aria-valuemax={480} tabindex="0" onpointerdown={resizeSidebar} onkeydown={keySidebar}></div>
+  <div class="-mx-2 w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuenow={ui.sidebarWidth} aria-valuemin={160} aria-valuemax={480} tabindex="0" hidden={!ui.sidebarOpen} onpointerdown={resizeSidebar} onkeydown={keySidebar}></div>
 
   <!-- Main -->
   <main bind:this={mainEl} class="card flex min-w-[300px] flex-1 flex-col overflow-hidden">
@@ -616,6 +689,35 @@
           {#if !db.loading}<button class="btn btn-primary mx-auto" onclick={newConnection}><Plus size={13} /> New connection</button>{/if}
         </div>
       </div>
+    {:else if tab.table}
+    {@const t = tab.table}
+    <div class="flex h-11 shrink-0 items-center gap-2 px-3">
+      {#if t.kind === 'view'}<Eye size={14} class="shrink-0 text-accent" />{:else}<Table2 size={14} class="shrink-0 text-accent" />{/if}
+      <span class="min-w-0 truncate text-[13px] font-semibold" title={displayName(t)}>{displayName(t)}</span>
+      <span class="hidden min-w-0 truncate text-[12px] text-faint md:inline">{conn.name} / {database}</span>
+      <div class="seg ml-2 shrink-0" role="tablist" aria-label="Table view">
+        <button class="seg-item {tab.view === 'data' ? 'seg-on' : ''}" role="tab" aria-selected={tab.view === 'data'} onclick={() => (tab.view = 'data')}>Data</button>
+        <button class="seg-item {tab.view === 'properties' ? 'seg-on' : ''}" role="tab" aria-selected={tab.view === 'properties'} onclick={() => (tab.view = 'properties')}>Properties</button>
+      </div>
+      <div class="flex-1"></div>
+      {#if tab.view === 'data'}
+        {#if busy}
+          <span class="font-mono text-[11.5px] text-muted tabular-nums">{((now - busy.started) / 1000).toFixed(1)} s</span>
+          <button class="btn btn-secondary" onclick={cancel} title="Cancel the running query"><Square size={11} class="fill-current" /> Cancel</button>
+        {:else}
+          <button class="btn btn-ghost" onclick={() => loadTableData(tab)} title="Load the rows again"><RotateCw size={13} /> Refresh</button>
+        {/if}
+      {/if}
+    </div>
+    {#if tab.view === 'data'}
+      <div class="relative min-h-0 flex-1 border-t border-line">
+        <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+      </div>
+    {:else}
+      <div class="flex min-h-0 flex-1 border-t border-line">
+        {#key tab.id}<TableProperties {conn} table={t} />{/key}
+      </div>
+    {/if}
     {:else}
     <div class="flex h-11 shrink-0 items-center gap-1.5 px-2.5">
       <TargetBar {conn} {database} onconn={switchConn} ondb={switchDb} />
@@ -672,14 +774,28 @@
 
     <!-- Hidden, not unmounted, so the grid keeps its scroll, selection and edit mode. -->
     <div class="contents" hidden={!ui.resultsOpen}>
-      <!-- Overlaps the editor and grid by 4 px each, so the grab area is wider than the border line. -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div class="relative z-10 -my-1 h-2 shrink-0 cursor-row-resize outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="horizontal" aria-label="Resize editor" aria-valuenow={Math.round(ui.editorSplit * 100)} aria-valuemin={10} aria-valuemax={80} tabindex="0" onpointerdown={resizeEditor} onkeydown={keyEditor}></div>
+      <div class="relative z-10 -my-1 h-2 shrink-0">
+        <!-- Overlaps the editor and grid by 4 px each, so the grab area is wider than the border line. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div class="absolute inset-0 cursor-row-resize outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="horizontal" aria-label="Resize editor" aria-valuenow={Math.round(ui.editorSplit * 100)} aria-valuemin={10} aria-valuemax={80} tabindex="0" onpointerdown={resizeEditor} onkeydown={keyEditor}></div>
+        <div class="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md border border-line bg-surface">
+          <button class="grid h-4 w-5 place-items-center text-faint hover:bg-hover hover:text-ink" title="Maximize results / restore" aria-label="Move split up" onclick={() => sash('up')}><ChevronUp size={12} /></button>
+          <button class="grid h-4 w-5 place-items-center text-faint hover:bg-hover hover:text-ink" title="Maximize editor / restore" aria-label="Move split down" onclick={() => sash('down')}><ChevronDown size={12} /></button>
+        </div>
+      </div>
 
-      <div class="relative min-h-0 flex-1 border-t border-line">
-        <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
-        <!-- Sits over the right end of the grid's header row; the surface fill keeps it clear of header text under it. -->
-        <button class="absolute top-1 right-1.5 z-20 grid size-6 place-items-center rounded-md bg-surface text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={14} /></button>
+      <div class="flex min-h-0 flex-1 flex-col border-t border-line">
+        <!-- Result tab strip (as in DBeaver): the tab names the source table; its X hides the results. -->
+        <div class="flex h-8 shrink-0 items-end border-b border-line px-1.5" role="tablist" aria-label="Results">
+          <div class="-mb-px flex h-7 items-center gap-1.5 rounded-t-md border border-b-0 border-line bg-surface pr-1 pl-2.5 text-[12.5px] font-medium text-ink" role="tab" aria-selected="true">
+            <Table2 size={13} class="text-accent" />
+            <span class="max-w-60 truncate">{tab.result?.table ?? 'Results'}</span>
+            <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={12} /></button>
+          </div>
+        </div>
+        <div class="relative min-h-0 flex-1">
+          <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+        </div>
       </div>
     </div>
 
@@ -693,11 +809,14 @@
   </main>
 
   {#if ui.chatOpen}
-    <ChatPanel onEnableWrites={() => (guardTarget = conn)} onInsertSql={(s) => (tab.query = s)} />
+    <!-- Below 880 px the panel floats over the main card, so it has no gap to drag. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div class="-mx-2 hidden w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40 min-[880px]:block" role="separator" aria-orientation="vertical" aria-label="Resize assistant" aria-valuenow={ui.chatWidth} aria-valuemin={280} aria-valuemax={640} tabindex="0" onpointerdown={resizeChat} onkeydown={keyChat}></div>
+    <ChatPanel onEnableWrites={() => (guardTarget = conn)} onInsertSql={(s) => (tab.table ? newTab(s) : (tab.query = s))} />
   {/if}
   </div>
 </div>
-<svelte:window onclick={() => (editorMenu = null)} oncontextmenu={() => (editorMenu = null)} onkeydown={(e) => { if (e.key === 'Escape') editorMenu = null; }} />
+<svelte:window onclick={() => (editorMenu = null)} oncontextmenu={(e) => { editorMenu = null; blockNativeMenu(e); }} onkeydown={(e) => { if (e.key === 'Escape') editorMenu = null; }} />
 {#if editorMenu}
   {@const m = editorMenu}
   <div class="popover fixed z-40 w-56 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
@@ -722,13 +841,13 @@
     <button class="grid size-5 shrink-0 place-items-center rounded text-faint hover:bg-hover hover:text-ink" aria-label="Dismiss" onclick={() => (notice = null)}><X size={12} /></button>
   </div>
 {/if}
-<WritePreview />
 <CommandPalette
   bind:open={paletteOpen}
   {tables}
   onfocuseditor={focusEditor}
   onrun={() => { if (kind === 'empty') return; ui.page = 'query'; run(); }}
   ontogglechat={() => (ui.chatOpen = !ui.chatOpen)}
+  ontogglesidebar={() => (ui.sidebarOpen = !ui.sidebarOpen)}
   onpage={(p) => (ui.page = p)}
   ontoggletheme={toggleTheme}
   onnewconnection={newConnection}

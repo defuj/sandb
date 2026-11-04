@@ -48,6 +48,10 @@ tauri-plugin-dialog = "2"
 libsqlite3-sys = { version = "0.30", default-features = false }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# AI client. The same reqwest and rustls builds as the updater uses, so nothing new is compiled.
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,6 +1,7 @@
 import type { TabStatus } from './api';
 import type { QueryResult } from './mock';
 import { active, type Conn } from './state.svelte';
+import type { TableRef } from './tableActions';
 
 /** An editor tab. `id` is also the backend `tabId` of its session. */
 export interface Tab {
@@ -16,6 +17,9 @@ export interface Tab {
   /** Tree key and SQL of the table opened from the tree or the palette (real backends). */
   opened: { key: string; sql: string } | null;
   status: TabStatus | null;
+  /** Set on a table tab (double-click or ⌘-click in the tree): it shows the table's data or properties, not the editor. */
+  table: TableRef | null;
+  view: 'data' | 'properties';
 }
 
 // state.svelte.ts imports this module too; neither touches the other at load time, so the cycle is safe.
@@ -49,11 +53,29 @@ export function newTab(query = ''): Tab {
     resultConn: c,
     opened: null,
     status: null,
+    table: null,
+    view: 'data',
   });
   // The pushed proxy, so callers mutate the stored tab.
   const t = tabs.list[tabs.list.length - 1];
   tabs.activeId = t.id;
   return t;
+}
+
+/** Opens a table tab on `c`, or selects the tab that already shows this table. Returns the tab and if it is new. */
+export function openTableTab(c: Conn, t: TableRef): { tab: Tab; created: boolean } {
+  const same = tabs.list.find((x) => x.table && x.connId === c.id && x.table.database === t.database && x.table.schema === t.schema && x.table.name === t.name);
+  if (same) {
+    tabs.activeId = same.id;
+    return { tab: same, created: false };
+  }
+  const nt = newTab();
+  nt.connId = c.id;
+  nt.database = c.engine === 'sqlite' ? 'main' : t.database;
+  nt.resultConn = c;
+  nt.title = t.name;
+  nt.table = t;
+  return { tab: nt, created: true };
 }
 
 export function selectTab(id: string) {

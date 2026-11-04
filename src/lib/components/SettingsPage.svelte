@@ -1,14 +1,33 @@
 <script lang="ts">
   import { ArrowLeft, Bot, KeyRound, Eye, EyeOff, Lock, Gauge, ShieldCheck, Palette, Sun, Moon, Monitor, Check, LoaderCircle, X, CircleArrowUp } from '@lucide/svelte';
-  import { ui, ai, db, providers, setTheme, engines, envTag, canWrite, type Provider, type Conn } from '../state.svelte';
+  import { ui, ai, db, providers, setTheme, engines, envTag, canWrite, aiSettings, saveAiSoon, saveAiKeySoon, flushAi, removeAiKey, type Provider, type Conn } from '../state.svelte';
+  import { api, ApiError } from '../api';
   import { appVersion, updates, checkForUpdates, installUpdate, restartApp, updatesEnabled as canUpdate } from '../updates.svelte';
 
   let { onEnableWrites }: { onEnableWrites: (c: Conn) => void } = $props();
 
   let showKey = $state(false);
   let test = $state<'idle' | 'testing' | 'ok' | 'fail'>('idle');
+  let tested = $state<{ models: number; ms: number } | null>(null);
+  let testError = $state<ApiError | null>(null);
+  // A test that a later edit made out of date must not show its result.
+  let testSeq = 0;
+
+  const keyNote = { tauri: 'Stored encrypted on this computer.', bridge: 'Kept in memory while the dev bridge runs.', mock: 'Demo build: no AI backend.' }[api.kind];
 
   const p = $derived(providers[ai.provider]);
+
+  function changed() {
+    testSeq++;
+    test = 'idle';
+    saveAiSoon();
+  }
+
+  function keyChanged() {
+    testSeq++;
+    test = 'idle';
+    saveAiKeySoon();
+  }
 
   function pick(id: Provider) {
     ai.provider = id;
@@ -16,14 +35,34 @@
       ai.baseUrl = providers[id].url;
       ai.model = providers[id].model;
     }
-    test = 'idle';
+    changed();
   }
 
-  function runTest() {
+  async function removeKey() {
+    testSeq++;
+    test = 'idle';
+    try {
+      await removeAiKey();
+    } catch (e) {
+      testError = ApiError.from(e);
+      test = 'fail';
+    }
+  }
+
+  async function runTest() {
+    const seq = ++testSeq;
     test = 'testing';
-    setTimeout(() => {
-      test = ai.baseUrl.trim() && ai.model.trim() && (!p.needsKey || ai.apiKey.trim()) ? 'ok' : 'fail';
-    }, 700);
+    try {
+      await flushAi();
+      const r = await api.testAi(aiSettings(), ai.apiKey || null);
+      if (seq !== testSeq) return;
+      tested = { models: r.modelCount, ms: r.latencyMs };
+      test = 'ok';
+    } catch (e) {
+      if (seq !== testSeq) return;
+      testError = ApiError.from(e);
+      test = 'fail';
+    }
   }
 
   function toggleWrites(c: Conn) {
@@ -57,12 +96,14 @@
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block sm:col-span-2">
               <span class="label mb-1.5 block">Base URL</span>
-              <input class="input font-mono text-[12.5px]" bind:value={ai.baseUrl} placeholder="https://host/v1" />
+              <input class="input font-mono text-[12.5px]" bind:value={ai.baseUrl} oninput={changed} placeholder="https://host/v1" />
             </label>
             <label class="block">
-              <span class="label mb-1.5 block">API key {#if !p.needsKey}<span>(optional)</span>{/if}</span>
+              <span class="label mb-1.5 flex items-center gap-1">API key {#if !p.needsKey}<span>(optional)</span>{/if}
+                {#if ai.hasKey}<button class="ml-auto rounded px-1 font-medium text-muted hover:bg-hover hover:text-red-600 dark:hover:text-red-400" onclick={removeKey} title="Delete the saved key">Remove</button>{/if}
+              </span>
               <div class="relative">
-                <input class="input pr-9 font-mono text-[12.5px]" type={showKey ? 'text' : 'password'} bind:value={ai.apiKey} placeholder={p.needsKey ? 'sk-…' : 'Not needed for local models'} />
+                <input class="input pr-9 font-mono text-[12.5px]" type={showKey ? 'text' : 'password'} bind:value={ai.apiKey} oninput={keyChanged} placeholder={ai.hasKey ? 'Saved key is hidden. Type to replace it.' : p.needsKey ? 'sk-…' : 'Not needed for local models'} />
                 <button class="absolute inset-y-0 right-1 grid w-7 place-items-center text-faint hover:text-ink" onclick={() => (showKey = !showKey)} aria-label={showKey ? 'Hide key' : 'Show key'}>
                   {#if showKey}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
                 </button>
@@ -70,21 +111,23 @@
             </label>
             <label class="block">
               <span class="label mb-1.5 block">Model</span>
-              <input class="input font-mono text-[12.5px]" bind:value={ai.model} placeholder="model-name" />
+              <input class="input font-mono text-[12.5px]" bind:value={ai.model} oninput={changed} placeholder="model-name" />
             </label>
           </div>
 
           <div class="mt-3 flex items-center gap-3">
-            <span class="flex items-center gap-1.5 text-[12px] text-faint"><KeyRound size={12} /> Kept in memory for this session only.</span>
+            <span class="flex items-center gap-1.5 text-[12px] text-faint"><KeyRound size={12} /> {keyNote}</span>
             <div class="flex-1"></div>
-            {#if test === 'ok'}<span class="flex items-center gap-1 text-[12px] font-medium text-emerald-700 dark:text-emerald-400"><Check size={13} /> Connected</span>
+            {#if test === 'ok' && tested}<span class="flex items-center gap-1 text-[12px] font-medium text-emerald-700 dark:text-emerald-400"><Check size={13} /> Connected · {tested.models.toLocaleString()} {tested.models === 1 ? 'model' : 'models'} · {tested.ms} ms</span>
             {:else if test === 'fail'}<span class="flex items-center gap-1 text-[12px] font-medium text-red-700 dark:text-red-400"><X size={13} /> Failed</span>
             {:else if test === 'testing'}<span class="text-[12px] text-muted">testing…</span>{/if}
             <button class="btn btn-secondary" onclick={runTest} disabled={test === 'testing'}>
               {#if test === 'testing'}<LoaderCircle size={13} class="animate-spin" />{/if} Test
             </button>
           </div>
-          {#if test === 'fail'}<p class="mt-1.5 text-right text-[12px] text-muted">Check URL, key and model</p>{/if}
+          {#if test === 'fail' && testError}
+            <p class="mt-1.5 text-right text-[12px] break-words text-muted">{testError.message}{#if testError.code === 'model_not_found' && testError.detail}{' '}<span class="text-faint">Models: {testError.detail}</span>{/if}</p>
+          {/if}
         </div>
       </section>
 
@@ -96,7 +139,7 @@
         </div>
         <div class="grid min-w-0 gap-2 sm:grid-cols-2">
           {#each [{ id: 'results', t: 'Schema and query results', d: 'Best answers. Result rows go to the model.' }, { id: 'schema', t: 'Schema only', d: 'Rows never leave this computer. The AI only writes SQL.' }] as o (o.id)}
-            <button class="rounded-lg border px-3.5 py-3 text-left transition {ai.privacy === o.id ? 'border-accent/70 bg-accent/6 ring-3 ring-accent/12' : 'border-line hover:bg-hover'}" onclick={() => (ai.privacy = o.id as 'results' | 'schema')}>
+            <button class="rounded-lg border px-3.5 py-3 text-left transition {ai.privacy === o.id ? 'border-accent/70 bg-accent/6 ring-3 ring-accent/12' : 'border-line hover:bg-hover'}" onclick={() => { ai.privacy = o.id as 'results' | 'schema'; changed(); }}>
               <div class="font-medium">{o.t}</div>
               <div class="mt-0.5 text-[12.5px] leading-snug text-muted">{o.d}</div>
             </button>
@@ -113,11 +156,11 @@
         <div class="grid min-w-0 gap-3 sm:grid-cols-2">
           <label class="block">
             <span class="label mb-1.5 block">Max rows</span>
-            <input class="input font-mono tabular-nums" type="number" min="1" max="10000" bind:value={ai.maxRows} />
+            <input class="input font-mono tabular-nums" type="number" min="1" max="10000" bind:value={ai.maxRows} oninput={changed} />
           </label>
           <label class="block">
             <span class="label mb-1.5 block">Timeout (seconds)</span>
-            <input class="input font-mono tabular-nums" type="number" min="1" max="300" bind:value={ai.timeoutSec} />
+            <input class="input font-mono tabular-nums" type="number" min="1" max="300" bind:value={ai.timeoutSec} oninput={changed} />
           </label>
         </div>
       </section>
