@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
+    "build:mac-intel": "tauri build --target x86_64-apple-darwin",
+    "build:mac-arm": "tauri build --target aarch64-apple-darwin",
     "bridge": "cargo run --manifest-path src-tauri/Cargo.toml --features dev-bridge --bin bridge",
     "dev:bridge": "VITE_BACKEND=bridge vite",
     "db:up": "testdb/scripts/up.sh",

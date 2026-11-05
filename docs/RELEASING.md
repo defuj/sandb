@@ -34,6 +34,8 @@ sandb uses Semantic Versioning (`MAJOR.MINOR.PATCH`). `package.json` holds the o
 
 ## Local build
 
+A release builds and publishes both macOS architectures: Apple Silicon (`aarch64-apple-darwin`) and Intel (`x86_64-apple-darwin`).
+
 `createUpdaterArtifacts` is on, so a local `pnpm tauri build` needs the private key:
 
 ```sh
@@ -42,8 +44,23 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 pnpm tauri build
 ```
 
+To build one architecture:
+
+```sh
+pnpm build:mac-arm    # Apple Silicon
+pnpm build:mac-intel  # Intel
+```
+
+Both scripts need the signing key above. Without the key, turn the updater artifacts off in the same command:
+
+```sh
+pnpm tauri build --target x86_64-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+Cross-compiling the other architecture needs its Rust target once: `rustup target add x86_64-apple-darwin` (on an Intel Mac) or `rustup target add aarch64-apple-darwin` (on Apple Silicon). The bundles land in `src-tauri/target/<target>/release/bundle/`; the Intel disk image is named `sandb_<version>_x64.dmg`.
+
 ## Notes
 
-- The build is Apple Silicon only and not notarized. A new user must right-click the app and choose Open the first time.
+- Releases include an Apple Silicon and an Intel build, neither is notarized. A new user must right-click the app and choose Open the first time.
 - A local `pnpm tauri build` is ad-hoc signed. Its signature is different from the release, so macOS asks again for Keychain access. To sign a local build like the release, import the `.p12` into a keychain and set `APPLE_SIGNING_IDENTITY="sandb Code Signing"`.
 - Before the update installs, sandb asks you to commit or roll back open transactions.
