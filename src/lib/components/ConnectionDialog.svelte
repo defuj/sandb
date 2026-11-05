@@ -299,7 +299,7 @@
           {/each}
         </div>
 
-        <label class="block">{@render field('Name')}<input class="input" bind:value={name} placeholder="e.g. billing-prod" /></label>
+        <label class="block">{@render field('Name')}<input class="input" bind:value={name} placeholder="e.g. billing-prod" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" /></label>
 
         <!-- Above the target fields so Environment and Read-only stay in view on short windows; the body still scrolls. -->
         <div class="space-y-2">
@@ -331,15 +331,15 @@
         </div>
 
         {#if engine === 'sqlite'}
-          <label class="block">{@render field('Database file')}<input class="input font-mono" bind:value={file} /></label>
+          <label class="block">{@render field('Database file')}<input class="input font-mono" bind:value={file} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" /></label>
         {:else}
           <div class="grid grid-cols-[1fr_96px] gap-2">
-            <label class="block">{@render field('Host')}<input class="input font-mono" bind:value={host} /></label>
+            <label class="block">{@render field('Host')}<input class="input font-mono" bind:value={host} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" /></label>
             <label class="block">{@render field('Port')}<input class="input font-mono tabular-nums" type="number" bind:value={port} /></label>
           </div>
-          <label class="block">{@render field('Database')}<input class="input font-mono" bind:value={database} placeholder="app" /></label>
+          <label class="block">{@render field('Database')}<input class="input font-mono" bind:value={database} placeholder="app" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" /></label>
           <div class="grid grid-cols-2 gap-2">
-            <label class="block">{@render field('User')}<input class="input font-mono" bind:value={user} /></label>
+            <label class="block">{@render field('User')}<input class="input font-mono" bind:value={user} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" /></label>
             <label class="block">{@render field('Password')}<input class="input font-mono" type="password" bind:value={password} oninput={() => (passwordDirty = true)} placeholder={conn && !passwordDirty && api.kind !== 'mock' ? 'Saved · type to replace' : '••••••••'} /></label>
           </div>
           <label class="block">{@render field('SSL mode')}

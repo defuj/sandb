@@ -1,29 +1,57 @@
 import { schemas, tableData, nsOf, type Row, type Cell } from './mock';
-import { active, ui, canWrite, flushAi, type Conn } from './state.svelte';
-import { activeTab } from './tabs.svelte';
-import { api, ApiError, type ChatEvent, type ChatRequest, type ErrorCode } from './api';
+import { active, ui, db, canWrite, flushAi, type Conn } from './state.svelte';
+import { activeTab, defaultDb } from './tabs.svelte';
+import { api, ApiError, type CellValue, type ChartSpec, type ChatEvent, type ChatRequest, type ErrorCode } from './api';
 import { logQuery, type AuditResult } from './audit.svelte';
 
 export type ToolStatus = 'running' | 'done' | 'blocked' | 'awaiting' | 'approved' | 'denied';
-/** `id`: the backend's tool call id (live replies only). */
-export type ToolPart = { kind: 'tool'; id?: string; name: string; sql?: string; status: ToolStatus; rows?: Row[]; note?: string };
+/**
+ * `id`: the backend's tool call id (live replies only). `args`: the arguments the model sent.
+ * `ms`: time from the call to its result. `truncated`: more rows exist than `rows` holds. `error`: the error code of a failed step.
+ * `source`: the database the step ran on (live replies only).
+ */
+export type ToolPart = {
+  kind: 'tool';
+  id?: string;
+  name: string;
+  args?: Record<string, unknown>;
+  sql?: string;
+  status: ToolStatus;
+  rows?: Row[];
+  truncated?: boolean;
+  note?: string;
+  started?: number;
+  ms?: number;
+  error?: string;
+  source?: Source;
+};
 /** `answer`: missing while the question is open, null when the user skipped it. */
 export type QuestionPart = { kind: 'question'; text: string; options: string[]; answer?: string | null };
 /** The reply stopped: an error, or the user pressed Stop. */
 export type ErrorPart = { kind: 'error'; text: string };
-export type Part = { kind: 'text'; text: string } | ToolPart | QuestionPart | ErrorPart;
+/** A chart of a `render_chart` read. `rows` are arrays in `columns` order. `truncated`: the read had more rows than the chart keeps. */
+export type ChartPart = { kind: 'chart'; spec: ChartSpec; columns: string[]; rows: CellValue[][]; truncated: boolean };
+export type Part = { kind: 'text'; text: string } | ToolPart | QuestionPart | ErrorPart | ChartPart;
 export interface Msg {
   role: 'user' | 'assistant';
   parts: Part[];
 }
-/** One conversation. It belongs to one connection. */
+/** A database of a chat. `database` null: the connection's own database (chats saved before a chat had several databases). */
+export interface Source {
+  connId: string;
+  database: string | null;
+}
+/** One conversation. It can use several databases, on one or more connections. */
 export interface Session {
   id: string;
-  connId: string;
+  sources: Source[];
   title: string;
   updated: number;
   messages: Msg[];
 }
+
+/** Databases in one chat; the backend refuses more. */
+export const MAX_SOURCES = 8;
 
 const KEY = 'sandb.chat.v1';
 const MAX_SESSIONS = 50;
@@ -31,8 +59,11 @@ const MAX_SESSIONS = 50;
 // A saved session can stop in the middle of a reply (the app closed). Its open steps can never finish.
 function load(): Session[] {
   try {
-    const list = JSON.parse(localStorage.getItem(KEY) ?? '[]') as Session[];
-    for (const s of list)
+    const list = JSON.parse(localStorage.getItem(KEY) ?? '[]') as (Session & { connId?: string })[];
+    for (const s of list) {
+      // Before a chat had several databases, it belonged to one connection.
+      if (!s.sources) s.sources = s.connId ? [{ connId: s.connId, database: null }] : [];
+      delete s.connId;
       for (const m of s.messages)
         for (const p of m.parts) {
           if (p.kind === 'tool' && (p.status === 'running' || p.status === 'awaiting')) {
@@ -41,6 +72,7 @@ function load(): Session[] {
           }
           if (p.kind === 'question' && p.answer === undefined) p.answer = null;
         }
+    }
     return list;
   } catch (e) {
     console.warn('Chat history is not readable; starting empty.', e);
@@ -50,8 +82,10 @@ function load(): Session[] {
 
 export const chat = $state({
   sessions: load(),
-  /** Open session per connection id. Missing: the newest one; '': a new, empty chat. */
-  open: {} as Record<string, string>,
+  /** The open session. null: the newest one; '': a new, empty chat. */
+  open: null as string | null,
+  /** Databases of the new, empty chat. null: the active tab's database, and it follows the tab. */
+  draft: null as Source[] | null,
   /** Id of the session that the running reply writes to; null when the assistant is idle. */
   live: null as string | null,
   /** A proposed write that waits for Approve or Deny. */
@@ -77,18 +111,48 @@ $effect.root(() => {
   });
 });
 
-export const sessionsOf = (connId: string) => chat.sessions.filter((s) => s.connId === connId).sort((a, b) => b.updated - a.updated);
+export const sessionsByDate = () => [...chat.sessions].sort((a, b) => b.updated - a.updated);
 
 /** The session the panel shows. While a reply runs, that session, so its questions stay visible. */
-export function current(connId: string): Session | undefined {
+export function current(): Session | undefined {
   if (chat.live) return chat.sessions.find((s) => s.id === chat.live);
-  const id = chat.open[connId];
-  if (id === '') return undefined;
-  return (id && chat.sessions.find((s) => s.id === id)) || sessionsOf(connId)[0];
+  if (chat.open === '') return undefined;
+  return (chat.open && chat.sessions.find((s) => s.id === chat.open)) || sessionsByDate()[0];
 }
 
-export function openSession(connId: string, id: string) {
-  if (!chat.live) chat.open[connId] = id;
+export function openSession(id: string) {
+  if (chat.live) return;
+  chat.open = id;
+  chat.draft = null;
+}
+
+export const connOf = (s: Source): Conn | undefined => db.connections.find((c) => c.id === s.connId);
+/** The database name of `s`; the connection's own database when the source has none. */
+export const dbOf = (s: Source, c = connOf(s)) => s.database ?? (c ? defaultDb(c) : '');
+export const sameSource = (a: Source, b: Source) => a.connId === b.connId && dbOf(a) === dbOf(b);
+
+/** The active tab's connection and database; null while there is no connection. */
+function tabSource(): Source | null {
+  const c = active();
+  if (!c.id) return null;
+  const t = activeTab();
+  return { connId: c.id, database: t?.connId === c.id ? t.database : defaultDb(c) };
+}
+
+/** Databases that `s` uses, or the new chat's databases. */
+export function scopeOf(s: Session | undefined): Source[] {
+  if (s) return s.sources;
+  if (chat.draft) return chat.draft;
+  const t = tabSource();
+  return t ? [t] : [];
+}
+
+/** Sets the databases of the open chat. A change applies from the next question. */
+export function setScope(list: Source[]) {
+  if (chat.live) return;
+  const s = current();
+  if (s) s.sources = list;
+  else chat.draft = list;
 }
 
 export function deleteSession(id: string) {
@@ -110,10 +174,51 @@ async function stream(msg: Msg, text: string) {
 }
 
 async function tool(msg: Msg, t: ToolPart, ms = 600) {
-  msg.parts.push(t);
+  msg.parts.push({ ...t, args: t.args ?? (t.name === 'describe_table' ? { table: t.sql } : { sql: t.sql }), started: Date.now() });
   const live = msg.parts[msg.parts.length - 1] as ToolPart;
   await sleep(ms);
   return live;
+}
+
+function finish(t: ToolPart) {
+  t.status = 'done';
+  if (t.started) t.ms = Date.now() - t.started;
+}
+
+/** Rows of a read that the chat keeps; the backend sends the same number (`UI_ROWS`). */
+const CHAT_ROWS = 50;
+
+/** Runs the SQL of a finished read step again on the AI read path and replaces its rows. */
+export async function rerun(t: ToolPart) {
+  if (t.name !== 'run_read_query' || !t.sql || t.status === 'running') return;
+  // Steps saved before they kept their database run on the active tab, as they did then.
+  const conn = t.source ? connOf(t.source) : active();
+  const tab = activeTab();
+  const database = t.source ? t.source.database : tab?.connId === conn?.id && tab?.database ? tab.database : null;
+  if (!conn) {
+    t.status = 'denied';
+    t.note = 'The connection of this step was deleted.';
+    return;
+  }
+  t.status = 'running';
+  t.started = Date.now();
+  t.error = undefined;
+  try {
+    const r = await api.runAiRead(conn.id, database, t.sql);
+    const cols = r.columns.map((c) => c.name);
+    t.rows = r.rows.slice(0, CHAT_ROWS).map((x) => Object.fromEntries(cols.map((c, i) => [c, x[i] as Cell])));
+    t.truncated = r.truncated || r.rows.length > CHAT_ROWS;
+    t.note = `${r.rows.length}${r.truncated ? ' (row limit reached)' : ''} row${r.rows.length === 1 ? '' : 's'} · ${r.elapsedMs} ms`;
+    finish(t);
+    logQuery({ conn, kind: 'READ', source: 'AI', sql: t.sql, result: { status: 'ok', rows: r.rows.length }, ms: t.ms ?? 0 });
+  } catch (e) {
+    const err = ApiError.from(e);
+    t.status = BLOCKED[err.code] ? 'blocked' : 'denied';
+    t.note = err.message;
+    t.error = err.code;
+    t.ms = Date.now() - t.started;
+    logQuery({ conn, kind: 'READ', source: 'AI', sql: t.sql, result: BLOCKED[err.code] ? { status: 'blocked' } : { status: 'error', message: err.message }, ms: 0 });
+  }
 }
 
 async function ask(msg: Msg, text: string, options: string[]) {
@@ -130,17 +235,19 @@ async function ask(msg: Msg, text: string, options: string[]) {
 
 export async function send(text: string) {
   if (!text.trim() || chat.live) return;
-  const conn = active();
-  let s = current(conn.id);
+  let s = current();
+  const sources = scopeOf(s).filter((x) => connOf(x));
+  if (!sources.length) return;
   if (!s) {
-    chat.sessions.unshift({ id: crypto.randomUUID(), connId: conn.id, title: text.trim(), updated: Date.now(), messages: [] });
+    chat.sessions.unshift({ id: crypto.randomUUID(), sources: sources.map((x) => ({ ...x })), title: text.trim(), updated: Date.now(), messages: [] });
     s = chat.sessions[0];
+    chat.draft = null;
     if (chat.sessions.length > MAX_SESSIONS) {
       const oldest = [...chat.sessions].sort((a, b) => a.updated - b.updated)[0];
       chat.sessions = chat.sessions.filter((x) => x !== oldest);
     }
   }
-  chat.open[conn.id] = s.id;
+  chat.open = s.id;
   chat.live = s.id;
   s.updated = Date.now();
   const history = historyOf(s.messages);
@@ -148,8 +255,8 @@ export async function send(text: string) {
   s.messages.push({ role: 'assistant', parts: [] });
   const msg = s.messages[s.messages.length - 1];
   try {
-    if (api.kind === 'mock') await reply(msg, text, conn);
-    else await liveReply(msg, text, conn, history);
+    if (api.kind === 'mock') await reply(msg, text, connOf(sources[0])!);
+    else await liveReply(msg, text, sources, history);
   } finally {
     chat.live = chat.pending = chat.question = chat.cancel = null;
   }
@@ -173,7 +280,7 @@ const NOT_BUILT = 'Approving AI writes is not built yet. Copy the SQL to the edi
 const countIn = (summary: string) => Number(/^([\d,]+)/.exec(summary)?.[1].replace(/,/g, '') ?? NaN);
 
 // Real backends: the Rust tool loop streams its steps; this maps each event onto the reply's parts.
-async function liveReply(msg: Msg, text: string, conn: Conn, history: ChatRequest['history']) {
+async function liveReply(msg: Msg, text: string, sources: Source[], history: ChatRequest['history']) {
   const chatId = crypto.randomUUID();
   let stopped = false;
   let ended = false;
@@ -194,17 +301,21 @@ async function liveReply(msg: Msg, text: string, conn: Conn, history: ChatReques
   }
   if (stopped) return fail('cancelled', '');
 
-  const tab = activeTab();
+  // `send` keeps only sources whose connection exists.
+  const conns = sources.map((x) => connOf(x)!);
   const request: ChatRequest = {
     chatId,
-    connId: conn.id,
-    database: tab?.connId === conn.id && tab.database ? tab.database : null,
-    schema: null,
+    sources: sources.map((x, i) => ({ connId: x.connId, database: x.database, schema: null, allowWrites: conns[i].aiWrite && canWrite(conns[i]) })),
     history,
     message: text,
-    allowWrites: conn.aiWrite && canWrite(conn),
   };
-  const steps = new Map<string, { part: ToolPart; started: number }>();
+  /** The source a tool call names (`db1` is the first); the only one when it names none. */
+  const sourceIn = (args: Record<string, unknown>) => {
+    const n = typeof args.source === 'string' ? /^db(\d+)$/.exec(args.source)?.[1] : undefined;
+    const i = n ? Number(n) - 1 : sources.length === 1 ? 0 : -1;
+    return i >= 0 && i < sources.length ? i : -1;
+  };
+  const steps = new Map<string, { part: ToolPart; started: number; conn: Conn }>();
 
   const onEvent = (e: ChatEvent) => {
     switch (e.type) {
@@ -216,8 +327,12 @@ async function liveReply(msg: Msg, text: string, conn: Conn, history: ChatReques
       }
       case 'tool_call': {
         const sql = typeof e.args.sql === 'string' ? e.args.sql : typeof e.args.table === 'string' ? e.args.table : undefined;
-        msg.parts.push({ kind: 'tool', id: e.id, name: e.name, sql, status: 'running' });
-        steps.set(e.id, { part: msg.parts[msg.parts.length - 1] as ToolPart, started: Date.now() });
+        const started = Date.now();
+        const i = sourceIn(e.args);
+        const source = i < 0 ? undefined : { ...sources[i] };
+        msg.parts.push({ kind: 'tool', id: e.id, name: e.name, args: e.args, sql, status: 'running', started, source });
+        // A call that names no valid source fails in the backend; its audit entry goes to the first database.
+        steps.set(e.id, { part: msg.parts[msg.parts.length - 1] as ToolPart, started, conn: conns[Math.max(i, 0)] });
         break;
       }
       case 'write_preview': {
@@ -229,18 +344,24 @@ async function liveReply(msg: Msg, text: string, conn: Conn, history: ChatReques
         ui.chatOpen = true;
         break;
       }
+      case 'chart':
+        msg.parts.push({ kind: 'chart', spec: e.spec, columns: e.columns, rows: e.rows, truncated: e.truncated });
+        break;
       case 'tool_result': {
         const step = steps.get(e.id);
         if (!step) break;
-        const { part, started } = step;
+        const { part, started, conn } = step;
         const blocked = !e.ok && !!e.error && !!BLOCKED[e.error.code];
         // An allowed write stays open: its preview already set the status and the note.
         if (part.status !== 'awaiting') {
           part.status = e.ok ? 'done' : blocked ? 'blocked' : 'denied';
           part.note = e.ok ? e.summary : (e.error?.message ?? e.summary);
         }
+        part.ms = Date.now() - started;
+        if (e.error) part.error = e.error.code;
         const columns = e.columns;
-        if (e.ok && columns && e.rows?.length) part.rows = e.rows.slice(0, 10).map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] as Cell])));
+        if (e.ok && columns && e.rows?.length) part.rows = e.rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] as Cell])));
+        if (e.truncated) part.truncated = true;
         if (part.name === 'run_read_query' && part.sql) {
           const n = countIn(e.summary);
           const result: AuditResult = e.ok ? { status: 'ok', rows: Number.isFinite(n) ? n : (e.rows?.length ?? 0) } : blocked ? { status: 'blocked' } : { status: 'error', message: e.error?.message ?? e.summary };
@@ -289,11 +410,11 @@ async function reply(msg: Msg, text: string, conn: Conn) {
 
   if (WRITE.test(text)) {
     const t1 = await tool(msg, { kind: 'tool', name: 'describe_table', sql: tables[0], status: 'running' }, 500);
-    t1.status = 'done';
+    finish(t1);
     t1.note = `${schema[tables[0]].length} columns · 48,210 rows`;
     const sql = "DELETE FROM public.orders\nWHERE status = 'cancelled'\n  AND created_at < now() - interval '90 days';";
     const c = await tool(msg, { kind: 'tool', name: 'run_read_query', sql: "SELECT count(*) FROM public.orders\nWHERE status = 'cancelled' AND created_at < now() - interval '90 days';", status: 'running' });
-    c.status = 'done';
+    finish(c);
     c.rows = [{ count: 214 }];
     logQuery({ conn, kind: 'READ', source: 'AI', sql: c.sql!, result: { status: 'ok', rows: 1 }, ms: 58 });
     const w = await tool(msg, { kind: 'tool', name: 'propose_write', sql, status: conn.aiWrite ? 'awaiting' : 'blocked' }, 300);
@@ -320,12 +441,40 @@ async function reply(msg: Msg, text: string, conn: Conn) {
   const named = /\b(?:from|table)\s+(?:table\s+)?[`"']?(\w+)/i.exec(text)?.[1];
   let target = named ? find(tables, named) : tables.find((t) => new RegExp(`\\b${t}\\b`, 'i').test(text));
 
+  if (!named && schema.orders && /\b(chart|graph|plot|report)\b/i.test(text)) {
+    const q = await tool(msg, { kind: 'tool', name: 'render_chart', sql: 'SELECT status, sum(total) AS revenue\nFROM public.orders\nGROUP BY status\nORDER BY revenue DESC;', status: 'running' }, 800);
+    finish(q);
+    q.note = 'Bar chart · 5 rows · 84 ms';
+    msg.parts.push({
+      kind: 'chart',
+      spec: { type: 'bar', title: 'Revenue by order status', x: 'status', y: ['revenue'], stacked: false },
+      columns: ['status', 'revenue'],
+      rows: [['paid', 1843210.5], ['shipped', 1290442.1], ['pending', 402118.0], ['cancelled', 0], ['refunded', -98220.4]],
+      truncated: false,
+    });
+    const m = await tool(msg, { kind: 'tool', name: 'render_chart', sql: "SELECT date_trunc('month', created_at) AS month, sum(total) AS revenue, count(*) AS orders\nFROM public.orders\nGROUP BY 1\nORDER BY 1;", status: 'running' }, 800);
+    finish(m);
+    m.note = 'Line chart · 6 rows · 61 ms';
+    msg.parts.push({
+      kind: 'chart',
+      spec: { type: 'line', title: 'Monthly revenue', x: 'month', y: ['revenue'], stacked: false },
+      columns: ['month', 'revenue'],
+      rows: [['2026-05', 512300], ['2026-06', 548120], ['2026-07', 601880], ['2026-08', 587400], ['2026-09', 642950], ['2026-10', 695210]],
+      truncated: false,
+    });
+    await stream(
+      msg,
+      '# Orders revenue report\n\nRevenue grew in five of the last six months. **Paid** orders bring most of the revenue.\n\n## Revenue by status\n\n| Status | Revenue |\n|---|---:|\n| paid | $1,843,210 |\n| shipped | $1,290,442 |\n| pending | $402,118 |\n| refunded | −$98,220 |\n\n## Findings\n\n- October is the best month so far ($695K).\n- Refunds remove about 2.5% of gross revenue.\n- About 8% of orders are cancelled.',
+    );
+    return;
+  }
+
   if (!target && !named && schema.orders && /\b(orders?|revenue)\b/i.test(text)) {
     const t1 = await tool(msg, { kind: 'tool', name: 'describe_table', sql: 'orders', status: 'running' }, 500);
-    t1.status = 'done';
+    finish(t1);
     t1.note = `${schema.orders.length} columns · 48,210 rows`;
     const q = await tool(msg, { kind: 'tool', name: 'run_read_query', sql: 'SELECT status, count(*) AS orders, sum(total) AS revenue\nFROM public.orders\nGROUP BY status\nORDER BY revenue DESC;', status: 'running' }, 800);
-    q.status = 'done';
+    finish(q);
     logQuery({ conn, kind: 'READ', source: 'AI', sql: q.sql!, result: { status: 'ok', rows: 5 }, ms: 84 });
     q.rows = [
       { status: 'paid', orders: 21480, revenue: 1843210.5 },
@@ -356,10 +505,10 @@ async function reply(msg: Msg, text: string, conn: Conn) {
   const data = tableData(schema, target);
   const total = data.base.length + data.added.length;
   const t1 = await tool(msg, { kind: 'tool', name: 'describe_table', sql: target, status: 'running' }, 500);
-  t1.status = 'done';
+  finish(t1);
   t1.note = `${schema[target].length} columns · ${total.toLocaleString()} rows`;
   const q = await tool(msg, { kind: 'tool', name: 'run_read_query', sql: `SELECT *\nFROM ${nsOf(conn.engine, target)}.${target}\nLIMIT 5;`, status: 'running' }, 700);
-  q.status = 'done';
+  finish(q);
   q.rows = data.base.slice(0, 5);
   logQuery({ conn, kind: 'READ', source: 'AI', sql: q.sql!, result: { status: 'ok', rows: q.rows.length }, ms: 41 });
   await stream(msg, `Here are the first ${q.rows.length} rows of **${target}** (${total.toLocaleString()} rows in total). Ask me to filter or summarize them.`);

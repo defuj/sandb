@@ -2,7 +2,7 @@
   import { Trash, Eraser, ShieldAlert, LoaderCircle } from '@lucide/svelte';
   import { engines, envTag } from '../state.svelte';
   import { ApiError } from '../api';
-  import { dangerSql, displayName, type Danger } from '../tableActions';
+  import { dangerSql, displayName, kindLabel, type Danger } from '../tableActions';
 
   let { target = $bindable(null), onconfirm }: { target?: Danger | null; onconfirm: (d: Danger) => Promise<void> } = $props();
 
@@ -38,7 +38,7 @@
 {#if target}
   {@const d = target}
   {@const drop = d.action === 'drop'}
-  {@const what = d.t.kind === 'view' ? 'view' : 'table'}
+  {@const what = kindLabel[d.t.kind]}
   <div class="dialog-backdrop">
     <div class="dialog max-w-md" role="alertdialog" aria-labelledby="danger-title">
       <header class="dialog-head">

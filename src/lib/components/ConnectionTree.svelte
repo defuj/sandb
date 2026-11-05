@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { ChevronRight, Table2, Plus, Layers, KeyRound, Columns2, Database, Pencil, Copy, Trash, Ellipsis, LoaderCircle, RotateCw, Eye, Lock, Hash, FileCode, FileSearch, FilePlus, Download, Sheet, Eraser } from '@lucide/svelte';
+  import { ChevronRight, Table2, Plus, Layers, KeyRound, Columns2, Database, Pencil, Copy, Trash, Ellipsis, LoaderCircle, RotateCw, Eye, ScanEye, ListTree, Lock, Hash, FileCode, FileSearch, FilePlus, Download, Sheet, Eraser } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { db, active, engines, envDot, canWrite, type Conn } from '../state.svelte';
   import { schemas, nsOf, pkOf, colType } from '../mock';
-  import { api, ApiError, type ColumnInfo, type TableInfo } from '../api';
-  import { displayName, type TableAction, type TableRef } from '../tableActions';
+  import { api, ApiError, type ColumnInfo, type TableInfo, type TableKind } from '../api';
+  import { displayName, kindLabel, type TableAction, type TableRef } from '../tableActions';
 
   let {
     selected,
@@ -102,6 +102,20 @@
     if (!isMock) refresh(t.schema === null ? `${c.id}/${t.database}` : `${c.id}/${t.database}/${t.schema}`);
   }
 
+  // Node keys that hold a table list, and where that list comes from.
+  const tableLists = $state<Record<string, { connId: string; database: string; schema: string | null }>>({});
+
+  /** Every table the tree has loaded, hidden partitions included, for the palette search. Partitions come last. */
+  export function loadedTables(): { c: Conn; t: TableRef; partition: boolean }[] {
+    const out: { c: Conn; t: TableRef; partition: boolean }[] = [];
+    for (const [k, l] of Object.entries(tableLists)) {
+      const c = db.connections.find((x) => x.id === l.connId);
+      if (!c || nodes[k]?.status !== 'ok') continue;
+      for (const t of tableList(k)) out.push({ c, t: { database: l.database, schema: l.schema, name: t.name, kind: t.kind }, partition: !!t.partitionOf });
+    }
+    return out.sort((a, b) => +a.partition - +b.partition);
+  }
+
   // Keys: connection id, `id/db`, `id/db/schema` (pg only), then `…/table`. Kept for the session only.
   const open = $state<Record<string, boolean>>({});
 
@@ -162,6 +176,26 @@
   const tableList = (key: string) => (nodes[key]?.items ?? []) as TableInfo[];
   const colList = (key: string) => (nodes[key]?.items ?? []) as ColumnInfo[];
 
+  // Tables, views and materialized views are separate folders; each shows PAGE rows, then Load more.
+  const PAGE = 100;
+  const kindGroups: { kind: TableKind; label: string; icon: typeof Table2 }[] = [
+    { kind: 'table', label: 'Tables', icon: Table2 },
+    { kind: 'view', label: 'Views', icon: Eye },
+    { kind: 'matview', label: 'Materialized views', icon: ScanEye },
+  ];
+  const kindIcon = Object.fromEntries(kindGroups.map((g) => [g.kind, g.icon])) as Record<TableKind, typeof Table2>;
+  // Rows shown per folder, by `<list key>#<kind>`. Absent: PAGE.
+  const shown = $state<Record<string, number>>({});
+
+  // PG partitions stay out of the tree unless the user shows them. One choice for all connections, kept across restarts.
+  const PARTITIONS_KEY = 'sandb.tree.show-partitions';
+  let showPartitions = $state(localStorage.getItem(PARTITIONS_KEY) === '1');
+  function setShowPartitions(on: boolean) {
+    showPartitions = on;
+    localStorage.setItem(PARTITIONS_KEY, on ? '1' : '0');
+  }
+  const visible = (list: TableInfo[]) => (showPartitions ? list : list.filter((t) => !t.partitionOf));
+
   /** Reloads a node and every loaded node below it. */
   function refresh(key: string) {
     for (const k of Object.keys(nodes).sort((a, b) => a.length - b.length)) {
@@ -173,7 +207,10 @@
   async function openDb(c: Conn, d: string, auto = false) {
     const k = `${c.id}/${d}`;
     open['o:' + k] = true;
-    if (c.engine !== 'pg') return ensure(k, () => api.listTables(c.id, d, null));
+    if (c.engine !== 'pg') {
+      tableLists[k] = { connId: c.id, database: d, schema: null };
+      return ensure(k, () => api.listTables(c.id, d, null));
+    }
     await ensure(k, () => api.listSchemas(c.id, d));
     const list = strings(k);
     const s = list.includes('public') ? 'public' : list[0];
@@ -183,6 +220,7 @@
   function openSchema(c: Conn, d: string, s: string) {
     const k = `${c.id}/${d}/${s}`;
     open['o:' + k] = true;
+    tableLists[k] = { connId: c.id, database: d, schema: s };
     ensure(k, () => api.listTables(c.id, d, s));
   }
 
@@ -213,6 +251,7 @@
   function forget(c: Conn) {
     const mine = (k: string) => k === c.id || k.startsWith(c.id + '/');
     for (const k of Object.keys(nodes)) if (mine(k)) (delete nodes[k], delete loaders[k], seq[k]++);
+    for (const k of Object.keys(shown)) if (mine(k)) delete shown[k];
     const wasOpen = open[c.id];
     for (const k of Object.keys(open)) if (mine(k.replace(/^o:/, ''))) delete open[k];
     if (wasOpen) expandReal(c);
@@ -251,22 +290,82 @@
 
 {#snippet realTables(c: Conn, d: string, s: string | null, level: number, anc: number[])}
   {@const pk0 = s === null ? `${c.id}/${d}` : `${c.id}/${d}/${s}`}
+  {@const all = tableList(pk0)}
+  {@const parts = all.filter((t) => t.partitionOf).length}
+  {@const shownList = visible(all)}
   <div class="relative" style="background:{guides(anc)}">
-    {#each tableList(pk0) as t (t.name)}
+    {#each kindGroups as g (g.kind)}
+      {@const items = shownList.filter((t) => t.kind === g.kind)}
+      <!-- Partitions are tables, so the toggle lives on the Tables folder. It stays when every table is a hidden partition. -->
+      {@const toggle = g.kind === 'table' && parts > 0}
+      {#if items.length || toggle}
+        {@const gk = `${pk0}#${g.kind}`}
+        <!-- The Tables folder starts open; the others start closed. -->
+        {@const gOpen = open['o:' + gk] ?? g.kind === 'table'}
+        {@const n = shown[gk] ?? PAGE}
+        <div class="group/n relative">
+          <button class="nav-item {toggle ? 'pr-7' : ''}" style={pad(level)} aria-expanded={gOpen} title={toggle && !showPartitions ? `${parts} partitions hidden` : undefined} onclick={() => (open['o:' + gk] = !gOpen)}>
+            <ChevronRight size={12} class="shrink-0 text-faint transition-transform {gOpen ? 'rotate-90' : ''}" />
+            <g.icon size={13} class="shrink-0 text-faint" />
+            <span class="min-w-0 flex-1 truncate">{g.label}</span>
+            <span class="text-[11px] text-faint tabular-nums {toggle ? 'group-hover/n:invisible' : ''}">{items.length}</span>
+          </button>
+          {#if toggle}
+            {@const label = showPartitions ? 'Hide partitions' : `Show ${parts} partitions`}
+            <button
+              class="absolute top-[3px] right-1 grid size-5 place-items-center rounded opacity-0 group-hover/n:opacity-100 focus-visible:opacity-100 hover:bg-hover hover:text-ink {showPartitions ? 'text-accent' : 'text-faint'}"
+              title={label}
+              aria-label={label}
+              aria-pressed={showPartitions}
+              onclick={() => setShowPartitions(!showPartitions)}
+            >
+              <ListTree size={12} />
+            </button>
+          {/if}
+        </div>
+        {#if gOpen}
+          {@render tableItems(c, d, s, pk0, items.slice(0, n), level + 1)}
+          {#if items.length > n}
+            <div class="relative" style="background:{guides([level])}">
+              <button class="nav-item text-faint hover:text-ink" style={pad(level + 1, 20)} onclick={() => (shown[gk] = n + PAGE)}>
+                <Ellipsis size={13} class="shrink-0" />
+                <span class="min-w-0 flex-1 truncate">Load {Math.min(PAGE, items.length - n)} more</span>
+                <span class="text-[11px] tabular-nums">{n} of {items.length}</span>
+              </button>
+            </div>
+          {/if}
+          {#if toggle && !showPartitions}
+            <div class="relative" style="background:{guides([level])}">
+              <button class="nav-item text-faint hover:text-ink" style={pad(level + 1, 20)} title="{parts} partitions hidden" onclick={() => setShowPartitions(true)}>
+                <ListTree size={13} class="shrink-0" />
+                <span class="min-w-0 flex-1 truncate">Show {parts} partitions</span>
+              </button>
+            </div>
+          {/if}
+        {/if}
+      {/if}
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet tableItems(c: Conn, d: string, s: string | null, pk0: string, items: TableInfo[], level: number)}
+  <div class="relative" style="background:{guides([level - 1])}">
+    {#each items as t (t.name)}
       {@const tk = `${pk0}/${t.name}`}
       {@const sel = hl === `${c.id}/${d}/${s ?? ''}/${t.name}`}
       {@const ref = { database: d, schema: s, name: t.name, kind: t.kind }}
+      {@const Icon = kindIcon[t.kind]}
       <div class="relative">
         <button
           class="nav-item select-none {sel ? 'nav-item-active' : ''}"
           style={pad(level, 20)}
-          title="{s ? s + '.' : ''}{t.name}{t.kind === 'view' ? ' (view)' : ''}{t.rowEstimate != null && t.rowEstimate >= 0 ? ` · ~${t.rowEstimate} rows` : ''}"
+          title="{s ? s + '.' : ''}{t.name}{t.kind === 'table' ? '' : ` (${kindLabel[t.kind]})`}{t.partitionOf ? ` · partition of ${t.partitionOf}` : ''}{t.rowEstimate != null && t.rowEstimate >= 0 ? ` · ~${t.rowEstimate} rows` : ''}"
           onclick={(e) => tableClick(e, `${c.id}/${d}/${s ?? ''}/${t.name}`, c, ref)}
           ondblclick={() => onopen(c, ref)}
           onkeydown={(e) => tableKey(e, c, ref)}
           oncontextmenu={(e) => openTableMenu(e, c, ref, pk0)}
         >
-          {#if t.kind === 'view'}<Eye size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{:else}<Table2 size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />{/if}
+          <Icon size={13} class="shrink-0 {sel ? 'text-accent' : 'text-faint'}" />
           <span class="min-w-0 flex-1 truncate">{t.name}</span>
         </button>
         {@render toggleBtn(level, !!open['o:' + tk], `Toggle columns of ${t.name}`, () => toggleCols(c, d, s, t.name, tk))}
@@ -338,10 +437,9 @@
     <button
       class="flex h-7 w-full items-center gap-2 rounded-md pr-2 text-left text-[13px] {isActive ? 'font-medium text-ink' : 'text-muted hover:text-ink'} {menuOn ? 'bg-active' : 'hover:bg-hover'}"
       style={pad(0)}
-      title="{c.name} · {c.version} · {c.env}{canWrite(c) ? '' : ' · read-only'} — double-click to edit"
+      title="{c.name} · {c.version} · {c.env}{canWrite(c) ? '' : ' · read-only'}"
       aria-expanded={!!open[c.id]}
       onclick={(e) => { if (e.detail > 1) return; open[c.id] ? (open[c.id] = false) : expand(c); }}
-      ondblclick={() => onedit(c)}
       oncontextmenu={(e) => openMenu(e, c)}
     >
       <ChevronRight size={12} class="shrink-0 text-faint transition-transform {open[c.id] ? 'rotate-90' : ''}" />
@@ -390,7 +488,7 @@
                     <ChevronRight size={12} class="shrink-0 text-faint transition-transform {open['o:' + sk] ? 'rotate-90' : ''}" />
                     <Layers size={13} class="shrink-0 text-faint" />
                     <span class="min-w-0 flex-1 truncate">{s}</span>
-                    {#if sn?.status === 'ok'}<span class="text-[11px] text-faint tabular-nums group-hover/n:invisible">{sn.items.length}</span>{/if}
+                    {#if sn?.status === 'ok'}<span class="text-[11px] text-faint tabular-nums group-hover/n:invisible">{visible(sn.items as TableInfo[]).length}</span>{/if}
                   </button>
                   {@render refreshBtn(sk, s)}
                 </div>
@@ -452,7 +550,7 @@
 
 {#if tableMenu}
   {@const m = tableMenu}
-  {@const isView = m.t.kind === 'view'}
+  {@const isView = m.t.kind !== 'table'}
   {@const noExport = canExport ? undefined : 'Needs the desktop app'}
   <div class="popover fixed z-40 w-60 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <div class="truncate px-2 pt-1 pb-1 text-[11.5px] text-faint" title={displayName(m.t)}>{displayName(m.t)}</div>
@@ -474,6 +572,6 @@
     {/if}
     <div class="mx-2 my-1 h-px bg-line"></div>
     <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={isView || m.c.readOnly} title={m.c.readOnly ? 'The connection is read-only' : undefined} onclick={() => tableAct('truncate')}><Eraser size={13} /> Truncate…</button>
-    <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={m.c.readOnly} title={m.c.readOnly ? 'The connection is read-only' : undefined} onclick={() => tableAct('drop')}><Trash size={13} /> Drop {isView ? 'view' : 'table'}…</button>
+    <button class="nav-item text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" role="menuitem" disabled={m.c.readOnly} title={m.c.readOnly ? 'The connection is read-only' : undefined} onclick={() => tableAct('drop')}><Trash size={13} /> Drop {kindLabel[m.t.kind]}…</button>
   </div>
 {/if}

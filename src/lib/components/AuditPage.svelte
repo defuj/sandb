@@ -71,7 +71,7 @@
     <div class="flex-1"></div>
     <div class="relative w-44">
       <Search size={13} class="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-faint" />
-      <input class="input h-7 pl-8 text-[12.5px]" placeholder="Search SQL or connection" bind:value={q} />
+      <input class="input h-7 pl-8 text-[12.5px]" placeholder="Search SQL or connection" bind:value={q} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" />
     </div>
     <select class="input h-7 w-36 pr-1 text-[12.5px]" bind:value={connId} aria-label="Connection">
       <option value="all">All connections</option>

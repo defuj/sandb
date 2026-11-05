@@ -86,6 +86,9 @@ export const httpBackend: Backend = {
   tableProperties: (connId, database, schema, table) => call('table_properties', { connId, database, schema, table }),
   schemaSnapshot: (connId, database) => call('schema_snapshot', { connId, database }),
   runQuery: (request) => call('run_query', { request }),
+  editableResult: (request) => call('editable_result', { request }),
+  applyEdits: (request) => call('apply_edits', { request }),
+  cellValue: (request) => call('cell_value', { request }),
   cancelQuery: (queryId) => call('cancel_query', { queryId }),
   queryProgress: (queryId) => call('query_progress', { queryId }),
   commitTransaction: (tabId) => call('commit_transaction', { tabId }),
@@ -107,4 +110,5 @@ export const httpBackend: Backend = {
   exportCsv: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' })),
   tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
   exportTableSql: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' })),
+  savePdf: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'Saving a PDF to a file needs the desktop app' })),
 };

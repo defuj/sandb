@@ -1,9 +1,9 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { ApiError, type Backend, type ChatEvent, type ChatRequest } from './types';
 
-async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+async function call<T>(cmd: string, args: Record<string, unknown> | Uint8Array = {}, headers?: Record<string, string>): Promise<T> {
   try {
-    return await invoke<T>(cmd, args);
+    return await invoke<T>(cmd, args, headers && { headers });
   } catch (e) {
     throw ApiError.from(e);
   }
@@ -38,6 +38,9 @@ export const tauriBackend: Backend = {
   tableProperties: (connId, database, schema, table) => call('table_properties', { connId, database, schema, table }),
   schemaSnapshot: (connId, database) => call('schema_snapshot', { connId, database }),
   runQuery: (request) => call('run_query', { request }),
+  editableResult: (request) => call('editable_result', { request }),
+  applyEdits: (request) => call('apply_edits', { request }),
+  cellValue: (request) => call('cell_value', { request }),
   cancelQuery: (queryId) => call('cancel_query', { queryId }),
   queryProgress: (queryId) => call('query_progress', { queryId }),
   commitTransaction: (tabId) => call('commit_transaction', { tabId }),
@@ -48,6 +51,7 @@ export const tauriBackend: Backend = {
   exportCsv: (connId, database, sql, tabId) => call('export_csv', { request: { connId, database, sql, tabId } }),
   tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
   exportTableSql: (connId, database, schema, table, data) => call('export_table_sql', { request: { connId, database, schema, table, data } }),
+  savePdf: (name, pdf) => call('save_pdf', pdf, { 'x-file-name': name }),
   guardCheck: (engine, sql) => call('guard_check', { engine, sql }),
   classifyWrite: (engine, sql) => call('classify_write', { engine, sql }),
   runAiRead: (connId, database, sql) => call('run_ai_read', { connId, database, sql }),

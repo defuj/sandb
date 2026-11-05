@@ -1,7 +1,13 @@
+<script lang="ts" module>
+  /** A table the palette can open. `key` is unique across connections and databases; `hint` names where it lives. */
+  export type PaletteTable = { key: string; label: string; hint?: string; open: () => void };
+</script>
+
 <script lang="ts">
   import { tick } from 'svelte';
-  import { Search, FileCode, Play, PanelRight, PanelLeft, Settings, ScrollText, SunMoon, Plus, Table2, Database } from '@lucide/svelte';
+  import { Search, FileCode, Play, PanelRight, PanelLeft, Settings, ScrollText, SunMoon, Plus, Table2, Database, Save } from '@lucide/svelte';
   import { db, active, envDot, type Conn } from '../state.svelte';
+  import { saved, type SavedQuery } from '../saved.svelte';
 
   type Item = { id: string; group: string; label: string; icon?: typeof Search; dot?: string; env?: string; hint?: string; run: () => void };
 
@@ -15,11 +21,12 @@
     onpage,
     ontoggletheme,
     onnewconnection,
-    onopentable,
     onswitch,
+    onsave,
+    onopensaved,
   }: {
     open?: boolean;
-    tables: string[];
+    tables: PaletteTable[];
     onfocuseditor: () => void;
     onrun: () => void;
     ontogglechat: () => void;
@@ -27,8 +34,9 @@
     onpage: (p: 'settings' | 'audit') => void;
     ontoggletheme: () => void;
     onnewconnection: () => void;
-    onopentable: (t: string) => void;
     onswitch: (c: Conn) => void;
+    onsave: () => void;
+    onopensaved: (q: SavedQuery) => void;
   } = $props();
 
   let q = $state('');
@@ -39,13 +47,15 @@
   const items = $derived<Item[]>([
     { id: 'a-new', group: 'Actions', label: 'New query / focus editor', icon: FileCode, run: onfocuseditor },
     { id: 'a-run', group: 'Actions', label: 'Run query', icon: Play, hint: '⌘↵', run: onrun },
+    { id: 'a-save', group: 'Actions', label: 'Save query', icon: Save, hint: '⌘S', run: onsave },
     { id: 'a-chat', group: 'Actions', label: 'Toggle AI chat', icon: PanelRight, run: ontogglechat },
     { id: 'a-sidebar', group: 'Actions', label: 'Toggle sidebar', icon: PanelLeft, run: ontogglesidebar },
     { id: 'a-settings', group: 'Actions', label: 'Open Settings', icon: Settings, run: () => onpage('settings') },
     { id: 'a-audit', group: 'Actions', label: 'Open Audit log', icon: ScrollText, run: () => onpage('audit') },
     { id: 'a-theme', group: 'Actions', label: 'Toggle theme', icon: SunMoon, run: ontoggletheme },
     { id: 'a-conn', group: 'Actions', label: 'New connection', icon: Plus, run: onnewconnection },
-    ...tables.map((t) => ({ id: 't-' + t, group: 'Tables', label: t, icon: Table2, run: () => onopentable(t) })),
+    ...saved.list.map((s) => ({ id: 's-' + s.id, group: 'Saved queries', label: s.name, icon: FileCode, hint: db.connections.find((c) => c.id === s.connId)?.name, run: () => onopensaved(s) })),
+    ...tables.map((t) => ({ id: 't-' + t.key, group: 'Tables', label: t.label, icon: Table2, hint: t.hint, run: t.open })),
     ...db.connections.map((c) => ({
       id: 'c-' + c.id,
       group: 'Connections',
@@ -121,7 +131,9 @@
           oninput={() => (sel = 0)}
           onkeydown={onkey}
           class="h-12 flex-1 bg-transparent text-[14px] outline-none placeholder:text-faint"
-          placeholder="Search actions, tables, connections…"
+          placeholder="Search actions, saved queries, tables…"
+          autocapitalize="off"
+          autocorrect="off"
           spellcheck="false"
           autocomplete="off"
         />

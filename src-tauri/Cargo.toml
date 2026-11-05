@@ -52,6 +52,9 @@ tauri-plugin-process = "2"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-util = { version = "0.7", default-features = false }
+keyring = "4.2"
+# Local date of the machine for the AI prompt ("today", "last month").
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

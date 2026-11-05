@@ -1,4 +1,4 @@
-import type { BytesValue, QueryRun, SchemaSnapshot, StatementResult } from './api';
+import type { BytesValue, QueryRun, SchemaSnapshot, SnapshotTable, StatementResult } from './api';
 import type { Cell, Engine, QueryResult, Schema } from './mock';
 
 export const isBytes = (v: unknown): v is BytesValue => !!v && typeof v === 'object' && '$bytes' in v && 'len' in v;
@@ -25,13 +25,13 @@ export function quoteIdent(engine: Engine, name: string): string {
   return engine === 'mysql' ? '`' + name.replace(/`/g, '``') + '`' : '"' + name.replace(/"/g, '""') + '"';
 }
 
-/** Table → columns for autocomplete and the palette; PG tables outside `public` are keyed `schema.table`. */
+/** Palette and autocomplete name of a snapshot table: PG tables outside `public` are `schema.table`. */
+export const snapshotKey = (t: SnapshotTable, engine: Engine) => (engine === 'pg' && t.schema && t.schema !== 'public' ? `${t.schema}.${t.name}` : t.name);
+
+/** Table → columns for autocomplete and the palette, keyed by `snapshotKey`. */
 export function snapshotSchema(s: SchemaSnapshot | null, engine: Engine): Schema {
   const out: Schema = {};
-  for (const t of s?.tables ?? []) {
-    const key = engine === 'pg' && t.schema && t.schema !== 'public' ? `${t.schema}.${t.name}` : t.name;
-    out[key] = t.columns.map((c) => c.name);
-  }
+  for (const t of s?.tables ?? []) out[snapshotKey(t, engine)] = t.columns.map((c) => c.name);
   return out;
 }
 

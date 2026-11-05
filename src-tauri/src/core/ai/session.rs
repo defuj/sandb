@@ -21,6 +21,8 @@ use crate::core::state::AppState;
 
 /// Model calls in one `chat_send`.
 pub const MAX_STEPS: usize = 8;
+/// Databases in one chat. Each adds its schema summary to the prompt.
+pub const MAX_SOURCES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,11 +38,10 @@ pub struct ChatTurn {
     pub content: String,
 }
 
+/// One database the chat can use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatRequest {
-    /// Key for `chat_cancel`.
-    pub chat_id: String,
+pub struct ChatSource {
     pub conn_id: String,
     /// `None`: the connection's own database.
     #[serde(default)]
@@ -48,13 +49,23 @@ pub struct ChatRequest {
     /// PG schema for `list_tables` and `describe_table`; `None` is `public`.
     #[serde(default)]
     pub schema: Option<String>,
+    /// The chat's write mode for this database. `propose_write` also needs a connection that
+    /// is not read-only.
+    #[serde(default)]
+    pub allow_writes: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRequest {
+    /// Key for `chat_cancel`.
+    pub chat_id: String,
+    /// 1 to `MAX_SOURCES` databases. The model names them `db1`, `db2`, … in this order.
+    pub sources: Vec<ChatSource>,
     /// Earlier turns, oldest first, without `message`.
     #[serde(default)]
     pub history: Vec<ChatTurn>,
     pub message: String,
-    /// The chat's write mode. `propose_write` also needs a connection that is not read-only.
-    #[serde(default)]
-    pub allow_writes: bool,
 }
 
 /// One streamed event. JSON: `{"type": "text", "delta": "…"}` and so on.
@@ -91,6 +102,16 @@ pub enum ChatEvent {
         id: String,
         sql: String,
         info: WriteInfo,
+    },
+    /// The chart of a `render_chart` read, sent before its `tool_result`. For the local UI only;
+    /// at most `tools::CHART_ROWS` rows.
+    Chart {
+        id: String,
+        spec: tools::ChartSpec,
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+        /// More rows exist than `rows` holds.
+        truncated: bool,
     },
     Error {
         error: AppError,
@@ -211,42 +232,74 @@ async fn converse(
     if req.message.trim().is_empty() {
         return Err(AppError::invalid("The message is empty"));
     }
-    let conn = connections::get(state, &req.conn_id)?;
+    if req.sources.is_empty() {
+        return Err(AppError::invalid(
+            "Choose at least one database for the chat",
+        ));
+    }
+    if req.sources.len() > MAX_SOURCES {
+        return Err(AppError::invalid(format!(
+            "A chat can use at most {MAX_SOURCES} databases"
+        )));
+    }
+    let mut sources = Vec::with_capacity(req.sources.len());
+    for (i, s) in req.sources.iter().enumerate() {
+        let conn = connections::get(state, &s.conn_id)?;
+        sources.push(tools::Source {
+            id: format!("db{}", i + 1),
+            database: connections::target_database(&conn, s.database.as_deref()),
+            schema: s
+                .schema
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            allow_writes: s.allow_writes,
+            conn,
+        });
+    }
     let settings = settings::load(state)?;
     if settings.model.trim().is_empty() {
         return Err(AppError::invalid("Choose an AI model in Settings first"));
     }
-    let client = AiClient::new(&settings.base_url, settings::stored_key(state)?)?;
-    let database = connections::target_database(&conn, req.database.as_deref());
-    let schema = req
-        .schema
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let client = AiClient::new(
+        settings.api(),
+        &settings.base_url,
+        settings::stored_key(state)?,
+    )?;
 
-    // The summary is a help, not a need: on an error or a slow server the model uses the tools.
+    // The summaries are a help, not a need: on an error or a slow server the model uses the tools.
     let limit = Duration::from_secs(settings.timeout_sec);
-    let snapshot = tokio::select! {
+    let reads = sources.iter().map(|s| async move {
+        tokio::time::timeout(
+            limit,
+            introspect::schema_snapshot(state, &s.conn.id, &s.database),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    });
+    let snapshots = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(cancelled()),
-        r = tokio::time::timeout(limit, introspect::schema_snapshot(state, &conn.id, &database)) => {
-            r.ok().and_then(Result::ok)
-        }
+        r = futures_util::future::join_all(reads) => r,
     };
+    let today = chrono::Local::now()
+        .format("%Y-%m-%d (%A), time zone UTC%:z")
+        .to_string();
     let system = prompt::system_prompt(&PromptInput {
-        conn: &conn,
-        database: &database,
-        schema,
-        snapshot: snapshot.as_ref(),
+        sources: &sources,
+        snapshots: &snapshots,
         settings: &settings,
-        allow_writes: req.allow_writes,
+        today: &today,
     });
 
+    let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
     let mut body = json!({
         "model": settings.model,
         "messages": [{"role": "system", "content": system}],
         "stream": true,
-        "tools": tools::definitions(),
+        "tools": tools::definitions(&ids),
         "tool_choice": "auto",
     });
     for turn in &req.history {
@@ -259,11 +312,8 @@ async fn converse(
 
     let ctx = ToolContext {
         state,
-        conn: &conn,
-        database: &database,
-        schema,
+        sources: &sources,
         settings: &settings,
-        allow_writes: req.allow_writes,
     };
     for _ in 0..MAX_STEPS {
         let answer: Completion = client
@@ -370,18 +420,128 @@ mod tests {
         (dir, st, conn.id)
     }
 
+    /// A SQLite connection whose table `t` has `rows` rows.
+    async fn sqlite_conn(st: &AppState, dir: &std::path::Path, name: &str, rows: u32) -> String {
+        use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+        use sqlx::{Connection as _, Executor as _};
+        let file = dir.join(format!("{name}.db"));
+        let mut c = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        (&mut c)
+            .execute(sqlx::raw_sql(&format!(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY); \
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows}) \
+                 INSERT INTO t SELECT i FROM n"
+            )))
+            .await
+            .unwrap();
+        c.close().await.unwrap();
+        connections::create(
+            st,
+            ConnectionInput {
+                name: name.into(),
+                engine: Engine::Sqlite,
+                env: Env::Local,
+                host: String::new(),
+                port: 0,
+                database: "main".into(),
+                user: String::new(),
+                ssl: SslMode::Disable,
+                file: file.to_string_lossy().into_owned(),
+                ai_write: false,
+                read_only: false,
+                version: None,
+            },
+            None,
+        )
+        .unwrap()
+        .id
+    }
+
+    /// One chat, two connections: each call runs on the database it names, and the prompt and
+    /// the tools tell the model the ids.
+    #[tokio::test]
+    async fn each_tool_call_runs_on_the_source_it_names() {
+        let call = |id: &str, args: Value| json!({"index": 0, "id": id, "function": {"name": "run_read_query", "arguments": args.to_string()}});
+        let (base, mut reqs) = serve(vec![
+            head("200 OK", "text/event-stream"),
+            sse(json!({"choices": [{"delta": {"tool_calls": [
+                call("a", json!({"sql": "SELECT id FROM t", "source": "db1"})),
+            ]}}]})),
+            sse(json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 1, "id": "b", "function": {"name": "run_read_query", "arguments": json!({"sql": "SELECT id FROM t", "source": "db2"}).to_string()}},
+            ]}}]})),
+            sse(json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 2, "id": "c", "function": {"name": "run_read_query", "arguments": json!({"sql": "SELECT id FROM t"}).to_string()}},
+            ]}, "finish_reason": "tool_calls"}]})),
+            done(),
+        ])
+        .await;
+        let (dir, st, _) = state_with(&base);
+        let small = sqlite_conn(&st, dir.path(), "small", 3).await;
+        let big = sqlite_conn(&st, dir.path(), "big", 5).await;
+        let mut req = request(&small, "compare");
+        req.sources.push(ChatSource {
+            conn_id: big,
+            database: None,
+            schema: None,
+            allow_writes: false,
+        });
+        let events = collect(&st, req).await;
+        let summary = |id: &str| {
+            events.iter().find_map(|e| match e {
+                ChatEvent::ToolResult {
+                    id: i, ok, summary, ..
+                } if i == id => Some((*ok, summary.clone())),
+                _ => None,
+            })
+        };
+        let (ok, s) = summary("a").unwrap();
+        assert!(ok && s.starts_with("3 rows"), "{s}");
+        let (ok, s) = summary("b").unwrap();
+        assert!(ok && s.starts_with("5 rows"), "{s}");
+        // Without a source the call fails; it never falls back to the first database.
+        let (ok, s) = summary("c").unwrap();
+        assert!(
+            !ok && s == "The tool needs \"source\", one of: db1, db2",
+            "{s}"
+        );
+
+        let raw = reqs.recv().await.unwrap();
+        let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.contains("Source db1:\n- Connection: \"small\""),
+            "{system}"
+        );
+        assert!(
+            system.contains("Source db2:\n- Connection: \"big\""),
+            "{system}"
+        );
+        assert!(system.contains("Schema summary of db2"), "{system}");
+        let read = &body["tools"][2]["function"]["parameters"];
+        assert_eq!(read["properties"]["source"]["enum"], json!(["db1", "db2"]));
+    }
+
     fn request(conn_id: &str, message: &str) -> ChatRequest {
         ChatRequest {
             chat_id: "chat-1".into(),
-            conn_id: conn_id.into(),
-            database: None,
-            schema: None,
+            sources: vec![ChatSource {
+                conn_id: conn_id.into(),
+                database: None,
+                schema: None,
+                allow_writes: false,
+            }],
             history: vec![ChatTurn {
                 role: ChatRole::User,
                 content: "earlier".into(),
             }],
             message: message.into(),
-            allow_writes: false,
         }
     }
 
@@ -430,14 +590,16 @@ mod tests {
     #[test]
     fn request_parses_camel_case_and_rejects_other_roles() {
         let r: ChatRequest = serde_json::from_value(json!({
-            "chatId": "a", "connId": "b", "database": null, "schema": null,
-            "history": [{"role": "assistant", "content": "x"}], "message": "m", "allowWrites": true
+            "chatId": "a",
+            "sources": [{"connId": "b", "database": null, "schema": null, "allowWrites": true}, {"connId": "c"}],
+            "history": [{"role": "assistant", "content": "x"}], "message": "m"
         }))
         .unwrap();
-        assert!(r.allow_writes);
+        assert!(r.sources[0].allow_writes);
+        assert!(!r.sources[1].allow_writes);
         assert_eq!(r.history[0].role, ChatRole::Assistant);
         let bad = serde_json::from_value::<ChatRequest>(json!({
-            "chatId": "a", "connId": "b", "history": [{"role": "system", "content": "x"}], "message": "m"
+            "chatId": "a", "sources": [{"connId": "b"}], "history": [{"role": "system", "content": "x"}], "message": "m"
         }));
         assert!(bad.is_err());
     }
@@ -474,7 +636,7 @@ mod tests {
         assert_eq!(msgs[1], json!({"role": "user", "content": "earlier"}));
         assert_eq!(msgs[2], json!({"role": "user", "content": "hello"}));
         assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -525,6 +687,25 @@ mod tests {
         assert!(matches!(
             &events[..],
             [ChatEvent::Error { error }] if error.code == ErrorCode::InvalidInput
+        ));
+    }
+
+    #[tokio::test]
+    async fn source_count_is_bounded() {
+        let (base, _r) = serve(vec![]).await;
+        let (_d, st, conn) = state_with(&base);
+        let mut req = request(&conn, "hi");
+        req.sources.clear();
+        let events = collect(&st, req.clone()).await;
+        assert!(matches!(
+            &events[..],
+            [ChatEvent::Error { error }] if error.message == "Choose at least one database for the chat"
+        ));
+        req.sources = vec![request(&conn, "hi").sources[0].clone(); MAX_SOURCES + 1];
+        let events = collect(&st, req).await;
+        assert!(matches!(
+            &events[..],
+            [ChatEvent::Error { error }] if error.message == "A chat can use at most 8 databases"
         ));
     }
 

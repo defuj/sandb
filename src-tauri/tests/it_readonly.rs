@@ -130,6 +130,7 @@ async fn editor(c: &Ctx, sql: &str) -> QueryRun {
             query_id: uuid::Uuid::new_v4().to_string(),
             limit: Some(10_000),
             tab_id: None,
+            sort: None,
         },
     )
     .await

@@ -1,8 +1,10 @@
 //! The tools the model can call. Reads go through the AI read path (guard, read-only session,
-//! limits); `propose_write` never runs SQL, it only shows the statement to the user.
+//! limits); `render_chart` reads the same way and sends the rows to the UI as a chart;
+//! `propose_write` never runs SQL, it only shows the statement to the user.
 
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::core::ai::session::ChatEvent;
@@ -19,16 +21,42 @@ use crate::core::state::AppState;
 pub const MAX_CONTENT_BYTES: usize = 32 * 1024;
 /// Rows of a query result sent to the UI.
 pub const UI_ROWS: usize = 50;
+/// Rows a chart keeps. Charts are saved with the chat, so this stays small.
+pub const CHART_ROWS: usize = 1000;
+const CHART_TYPES: [&str; 5] = ["bar", "line", "area", "pie", "scatter"];
+/// Most value columns of one chart.
+const MAX_SERIES: usize = 8;
 const CUT_MARKER: &str = "\n[cut: the tool output was longer than 32 KiB]";
 
-/// OpenAI function tool definitions.
-pub fn definitions() -> Value {
+/// OpenAI function tool definitions. Every tool takes `source`, one of `ids`; it is required
+/// when the chat has more than one source.
+pub fn definitions(ids: &[&str]) -> Value {
+    let mut defs = base_definitions();
+    let source = json!({
+        "type": "string",
+        "enum": ids,
+        "description": "Id of the database to use, from the system prompt (for example db1).",
+    });
+    for d in defs.as_array_mut().into_iter().flatten() {
+        let params = &mut d["function"]["parameters"];
+        params["properties"]["source"] = source.clone();
+        if ids.len() > 1 {
+            match params["required"].as_array_mut() {
+                Some(r) => r.push(json!("source")),
+                None => params["required"] = json!(["source"]),
+            }
+        }
+    }
+    defs
+}
+
+fn base_definitions() -> Value {
     json!([
         {
             "type": "function",
             "function": {
                 "name": "list_tables",
-                "description": "List the tables and views of the database.",
+                "description": "List the tables and views of one database.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -69,6 +97,26 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "render_chart",
+                "description": "Run one read-only SQL statement and show its result to the user as a chart in the chat. The chart is also in the PDF export of the reply. Shape the data in SQL: one row per point, sorted, already aggregated.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "Exactly one read-only statement."},
+                        "type": {"type": "string", "enum": CHART_TYPES, "description": "bar, line, area, pie or scatter."},
+                        "title": {"type": "string", "description": "Short chart title."},
+                        "x": {"type": "string", "description": "Result column for the x axis (pie: the slice labels)."},
+                        "y": {"type": "array", "items": {"type": "string"}, "description": "Result columns with the numeric values, one series each (pie: exactly one)."},
+                        "series": {"type": "string", "description": "Optional result column that splits one y column into one series per distinct value (long format). Not for pie."},
+                        "stacked": {"type": "boolean", "description": "Stack the series (bar and area)."}
+                    },
+                    "required": ["sql", "type", "x", "y"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "propose_write",
                 "description": "Propose SQL that changes data or schema. It does not run: the user sees it and decides.",
                 "parameters": {
@@ -95,21 +143,57 @@ pub fn parse_args(raw: &str) -> Option<Map<String, Value>> {
     }
 }
 
+/// One database of the chat. The model names it by `id`.
+#[derive(Debug)]
+pub struct Source {
+    /// `db1`, `db2`, … in the order of the request.
+    pub id: String,
+    pub conn: Connection,
+    pub database: String,
+    /// PG schema for `list_tables` and `describe_table` when the model gives none.
+    pub schema: Option<String>,
+    /// The chat's write mode for this source is on.
+    pub allow_writes: bool,
+}
+
 /// What one chat runs against.
 pub struct ToolContext<'a> {
     pub state: &'a AppState,
-    pub conn: &'a Connection,
-    pub database: &'a str,
-    /// PG schema for `list_tables` and `describe_table` when the model gives none.
-    pub schema: Option<&'a str>,
+    /// At least one.
+    pub sources: &'a [Source],
     pub settings: &'a AiSettings,
-    /// The chat's write mode is on.
-    pub allow_writes: bool,
+}
+
+impl ToolContext<'_> {
+    /// The source that `args` names. Without `source`, the only one; with more, an error.
+    fn source(&self, args: &Map<String, Value>) -> Result<&Source, AppError> {
+        let ids = || {
+            self.sources
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match opt_str(args, "source") {
+            Some(id) => self.sources.iter().find(|s| s.id == id).ok_or_else(|| {
+                AppError::invalid(format!(
+                    "Unknown source {}. Use one of: {}",
+                    quoted(id),
+                    ids()
+                ))
+            }),
+            None if self.sources.len() == 1 => Ok(&self.sources[0]),
+            None => Err(AppError::invalid(format!(
+                "The tool needs \"source\", one of: {}",
+                ids()
+            ))),
+        }
+    }
 }
 
 /// The result of one tool call.
 pub struct ToolOutput {
-    /// For the UI, in order: a `write_preview` when there is one, then the `tool_result`.
+    /// For the UI, in order: a `write_preview` or `chart` when there is one, then the `tool_result`.
     pub events: Vec<ChatEvent>,
     /// The `tool` message for the model, at most `MAX_CONTENT_BYTES`.
     pub content: String,
@@ -121,6 +205,7 @@ struct Done {
     columns: Option<Vec<String>>,
     rows: Option<Vec<Vec<Value>>>,
     truncated: Option<bool>,
+    /// An event sent before the `tool_result`: a `write_preview` or a `chart`.
     preview: Option<ChatEvent>,
     content: Value,
 }
@@ -164,7 +249,8 @@ pub async fn execute(ctx: &ToolContext<'_>, id: &str, name: &str, raw_args: &str
             }
         }
         Err(e) => {
-            let hide = name == "run_read_query" && ctx.settings.privacy == Privacy::Schema;
+            let read = name == "run_read_query" || name == "render_chart";
+            let hide = read && ctx.settings.privacy == Privacy::Schema;
             let err = model_error(&e, hide);
             ToolOutput {
                 events: vec![ChatEvent::ToolResult {
@@ -228,6 +314,7 @@ async fn run(
         "list_tables" => list_tables(ctx, args).await,
         "describe_table" => describe_table(ctx, args).await,
         "run_read_query" => run_read_query(ctx, args).await,
+        "render_chart" => render_chart(ctx, id, args).await,
         "propose_write" => propose_write(ctx, id, args),
         _ => Err(AppError::not_found(format!("Unknown tool {name}"))),
     }
@@ -249,18 +336,19 @@ fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn schema_of<'a>(ctx: &'a ToolContext<'a>, args: &'a Map<String, Value>) -> Option<&'a str> {
-    if ctx.conn.engine != Engine::Pg {
+fn schema_of<'a>(src: &'a Source, args: &'a Map<String, Value>) -> Option<&'a str> {
+    if src.conn.engine != Engine::Pg {
         return None;
     }
-    opt_str(args, "schema").or(ctx.schema)
+    opt_str(args, "schema").or(src.schema.as_deref())
 }
 
 async fn list_tables(ctx: &ToolContext<'_>, args: &Map<String, Value>) -> Result<Done, AppError> {
-    let schema = schema_of(ctx, args);
-    let tables = introspect::list_tables(ctx.state, &ctx.conn.id, ctx.database, schema).await?;
+    let src = ctx.source(args)?;
+    let schema = schema_of(src, args);
+    let tables = introspect::list_tables(ctx.state, &src.conn.id, &src.database, schema).await?;
     let mut content = json!({ "tables": tables });
-    if ctx.conn.engine == Engine::Pg {
+    if src.conn.engine == Engine::Pg {
         content["schema"] = json!(schema.unwrap_or("public"));
     }
     Ok(Done::plain(count(tables.len(), "table", "tables"), content))
@@ -270,10 +358,11 @@ async fn describe_table(
     ctx: &ToolContext<'_>,
     args: &Map<String, Value>,
 ) -> Result<Done, AppError> {
+    let src = ctx.source(args)?;
     let table = req_str(args, "table")?;
-    let schema = schema_of(ctx, args);
+    let schema = schema_of(src, args);
     let columns =
-        introspect::list_columns(ctx.state, &ctx.conn.id, ctx.database, schema, table).await?;
+        introspect::list_columns(ctx.state, &src.conn.id, &src.database, schema, table).await?;
     Ok(Done::plain(
         count(columns.len(), "column", "columns"),
         json!({ "table": table, "columns": columns }),
@@ -284,12 +373,16 @@ async fn run_read_query(
     ctx: &ToolContext<'_>,
     args: &Map<String, Value>,
 ) -> Result<Done, AppError> {
+    let src = ctx.source(args)?;
     let sql = req_str(args, "sql")?;
-    let limits = ReadLimits {
-        max_rows: ctx.settings.max_rows as usize,
-        timeout: Duration::from_secs(ctx.settings.timeout_sec),
-    };
-    let r = readonly::run_ai_read(ctx.state, &ctx.conn.id, Some(ctx.database), sql, limits).await?;
+    let r = readonly::run_ai_read(
+        ctx.state,
+        &src.conn.id,
+        Some(&src.database),
+        sql,
+        limits(ctx),
+    )
+    .await?;
     let n = r.rows.len();
     let more = if r.truncated {
         " (row limit reached)"
@@ -350,28 +443,179 @@ fn read_content(r: &AiReadResult, privacy: Privacy) -> Value {
     out
 }
 
+fn limits(ctx: &ToolContext<'_>) -> ReadLimits {
+    ReadLimits {
+        max_rows: ctx.settings.max_rows as usize,
+        timeout: Duration::from_secs(ctx.settings.timeout_sec),
+    }
+}
+
+/// What the UI draws. Every column name is a column of the result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChartSpec {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub x: String,
+    pub y: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
+    pub stacked: bool,
+}
+
+/// The chart arguments. Checked before the query runs; the column names are checked after it.
+fn chart_spec(args: &Map<String, Value>) -> Result<ChartSpec, AppError> {
+    let kind = req_str(args, "type")?;
+    if !CHART_TYPES.contains(&kind) {
+        return Err(AppError::invalid(format!(
+            "\"type\" must be one of: {}",
+            CHART_TYPES.join(", ")
+        )));
+    }
+    let x = req_str(args, "x")?.to_string();
+    // Some models send one column as a plain string.
+    let y: Vec<String> = match args.get("y") {
+        Some(Value::String(s)) => vec![s.trim().to_string()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if y.is_empty() || y.iter().any(String::is_empty) {
+        return Err(AppError::invalid(
+            "The tool needs \"y\": a list of value column names",
+        ));
+    }
+    if y.len() > MAX_SERIES {
+        return Err(AppError::invalid(format!(
+            "A chart takes at most {MAX_SERIES} y columns"
+        )));
+    }
+    let series = opt_str(args, "series").map(str::to_string);
+    if kind == "pie" && (y.len() != 1 || series.is_some()) {
+        return Err(AppError::invalid(
+            "A pie chart takes exactly one y column and no series",
+        ));
+    }
+    if series.is_some() && y.len() != 1 {
+        return Err(AppError::invalid(
+            "With \"series\", give exactly one y column",
+        ));
+    }
+    Ok(ChartSpec {
+        kind: kind.to_string(),
+        title: opt_str(args, "title").map(str::to_string),
+        x,
+        y,
+        series,
+        stacked: args.get("stacked").and_then(Value::as_bool) == Some(true),
+    })
+}
+
+/// Every column the chart names is in the result. The error lists the result's columns, so the
+/// model can fix its arguments; names are schema, never row values.
+fn check_columns(spec: &ChartSpec, columns: &[String]) -> Result<(), AppError> {
+    let missing: Vec<String> = std::iter::once(&spec.x)
+        .chain(&spec.y)
+        .chain(&spec.series)
+        .filter(|c| !columns.contains(c))
+        .map(|c| quoted(c))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let have: Vec<String> = columns.iter().map(|c| quoted(c)).collect();
+    Err(AppError::invalid(format!(
+        "The result has no column {}. Its columns: {}",
+        missing.join(", "),
+        have.join(", ")
+    )))
+}
+
+fn quoted(name: &str) -> String {
+    Value::from(name).to_string()
+}
+
+async fn render_chart(
+    ctx: &ToolContext<'_>,
+    id: &str,
+    args: &Map<String, Value>,
+) -> Result<Done, AppError> {
+    let src = ctx.source(args)?;
+    let spec = chart_spec(args)?;
+    let sql = req_str(args, "sql")?;
+    let r = readonly::run_ai_read(
+        ctx.state,
+        &src.conn.id,
+        Some(&src.database),
+        sql,
+        limits(ctx),
+    )
+    .await?;
+    let columns: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+    check_columns(&spec, &columns)?;
+    let n = r.rows.len();
+    let more = if r.truncated {
+        " (row limit reached)"
+    } else {
+        ""
+    };
+    let mut kind = spec.kind.clone();
+    kind[..1].make_ascii_uppercase();
+    let summary = format!(
+        "{kind} chart · {}{more} · {} ms",
+        count(n, "row", "rows"),
+        r.elapsed_ms
+    );
+    let mut content = read_content(&r, ctx.settings.privacy);
+    content["chart"] = json!(if n > CHART_ROWS {
+        format!("Shown to the user. It draws the first {CHART_ROWS} rows.")
+    } else {
+        "Shown to the user.".to_string()
+    });
+    let truncated = r.truncated || n > CHART_ROWS;
+    let mut rows = r.rows;
+    rows.truncate(CHART_ROWS);
+    let mut done = Done::plain(summary, content);
+    done.preview = Some(ChatEvent::Chart {
+        id: id.to_string(),
+        spec,
+        columns,
+        rows,
+        truncated,
+    });
+    Ok(done)
+}
+
 fn propose_write(
     ctx: &ToolContext<'_>,
     id: &str,
     args: &Map<String, Value>,
 ) -> Result<Done, AppError> {
+    let src = ctx.source(args)?;
     let sql = req_str(args, "sql")?;
-    if !conn_ro::writes_allowed(ctx.conn) {
+    if !conn_ro::writes_allowed(&src.conn) {
         return Err(AppError::new(
             ErrorCode::WriteBlocked,
             format!(
                 "Connection \"{}\" is read-only, so the assistant cannot propose writes",
-                ctx.conn.name
+                src.conn.name
             ),
         ));
     }
-    if !ctx.allow_writes {
+    if !src.allow_writes {
         return Err(AppError::new(
             ErrorCode::WriteBlocked,
-            "Write mode is off, so the assistant cannot propose writes",
+            format!(
+                "Write mode is off on \"{}\", so the assistant cannot propose writes",
+                src.conn.name
+            ),
         ));
     }
-    let info = guard::classify_write(sql, ctx.conn.engine);
+    let info = guard::classify_write(sql, src.conn.engine);
     let mut done = Done::plain(
         "Waiting for your approval".into(),
         json!({
@@ -469,8 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn definitions_name_four_tools() {
-        let names: Vec<String> = definitions()
+    fn definitions_name_five_tools() {
+        let names: Vec<String> = definitions(&["db1"])
             .as_array()
             .unwrap()
             .iter()
@@ -482,9 +726,132 @@ mod tests {
                 "list_tables",
                 "describe_table",
                 "run_read_query",
+                "render_chart",
                 "propose_write"
             ]
         );
+    }
+
+    /// One source: `source` is optional, so a model that never names it still works. More
+    /// sources: every tool must name one of them.
+    #[test]
+    fn source_is_required_only_with_several_sources() {
+        for d in definitions(&["db1"]).as_array().unwrap() {
+            let p = &d["function"]["parameters"];
+            assert_eq!(p["properties"]["source"]["enum"], json!(["db1"]));
+            let required = p["required"].as_array().cloned().unwrap_or_default();
+            assert!(!required.contains(&json!("source")), "{d}");
+        }
+        for d in definitions(&["db1", "db2"]).as_array().unwrap() {
+            let p = &d["function"]["parameters"];
+            assert_eq!(p["properties"]["source"]["enum"], json!(["db1", "db2"]));
+            assert!(
+                p["required"].as_array().unwrap().contains(&json!("source")),
+                "{d}"
+            );
+        }
+        let describe = &definitions(&["db1", "db2"])[1]["function"]["parameters"]["required"];
+        assert_eq!(describe, &json!(["table", "source"]));
+    }
+
+    fn source(id: &str, name: &str) -> Source {
+        use crate::core::connections::{Env, SslMode};
+        Source {
+            id: id.into(),
+            conn: Connection {
+                id: format!("c-{id}"),
+                name: name.into(),
+                engine: Engine::Pg,
+                version: String::new(),
+                env: Env::Local,
+                host: "h".into(),
+                port: 5432,
+                database: "shop".into(),
+                user: "u".into(),
+                ssl: SslMode::Prefer,
+                file: String::new(),
+                ai_write: false,
+                read_only: false,
+            },
+            database: "shop".into(),
+            schema: None,
+            allow_writes: false,
+        }
+    }
+
+    #[test]
+    fn tools_run_on_the_named_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            dir.path(),
+            Box::new(crate::core::secrets::MemoryStore::new()),
+        )
+        .unwrap();
+        let settings = AiSettings::default();
+        let args = |v: Value| chart_args(v);
+
+        let one = [source("db1", "a")];
+        let ctx = ToolContext {
+            state: &state,
+            sources: &one,
+            settings: &settings,
+        };
+        assert_eq!(ctx.source(&args(json!({}))).unwrap().id, "db1");
+
+        let two = [source("db1", "a"), source("db2", "b")];
+        let ctx = ToolContext {
+            state: &state,
+            sources: &two,
+            settings: &settings,
+        };
+        assert_eq!(
+            ctx.source(&args(json!({"source": "db2"})))
+                .unwrap()
+                .conn
+                .name,
+            "b"
+        );
+        // A guess must not land on the first database.
+        let e = ctx.source(&args(json!({}))).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInput);
+        assert_eq!(e.message, "The tool needs \"source\", one of: db1, db2");
+        let e = ctx.source(&args(json!({"source": "db3"}))).unwrap_err();
+        assert_eq!(e.message, "Unknown source \"db3\". Use one of: db1, db2");
+    }
+
+    #[tokio::test]
+    async fn write_mode_is_per_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            dir.path(),
+            Box::new(crate::core::secrets::MemoryStore::new()),
+        )
+        .unwrap();
+        let settings = AiSettings::default();
+        let mut writable = source("db2", "staging");
+        writable.allow_writes = true;
+        let sources = [source("db1", "prod"), writable];
+        let ctx = ToolContext {
+            state: &state,
+            sources: &sources,
+            settings: &settings,
+        };
+        let sql = r#"{"sql": "DELETE FROM t", "source": "db1"}"#;
+        let out = execute(&ctx, "w1", "propose_write", sql).await;
+        assert!(matches!(
+            &out.events[..],
+            [ChatEvent::ToolResult { ok: false, error: Some(e), .. }]
+                if e.code == ErrorCode::WriteBlocked && e.message.contains("\"prod\"")
+        ));
+        let sql = r#"{"sql": "DELETE FROM t", "source": "db2"}"#;
+        let out = execute(&ctx, "w2", "propose_write", sql).await;
+        assert!(matches!(
+            &out.events[..],
+            [
+                ChatEvent::WritePreview { .. },
+                ChatEvent::ToolResult { ok: true, .. }
+            ]
+        ));
     }
 
     #[test]
@@ -518,5 +885,82 @@ mod tests {
         let v = model_error(&server, false);
         assert!(v["message"].as_str().unwrap().contains("alice"), "{v}");
         assert!(v["detail"].as_str().unwrap().contains("alice"), "{v}");
+    }
+
+    fn chart_args(v: Value) -> Map<String, Value> {
+        let Value::Object(m) = v else { unreachable!() };
+        m
+    }
+
+    #[test]
+    fn chart_spec_takes_valid_arguments() {
+        let s = chart_spec(&chart_args(json!({
+            "sql": "SELECT 1", "type": "bar", "x": "month", "y": ["revenue", "orders"],
+            "title": "Sales", "stacked": true
+        })))
+        .unwrap();
+        assert_eq!(s.y, ["revenue", "orders"]);
+        assert!(s.stacked);
+        // A model that sends one column as a string still gets its chart.
+        let s = chart_spec(&chart_args(
+            json!({"type": "line", "x": "day", "y": "total"}),
+        ))
+        .unwrap();
+        assert_eq!(s.y, ["total"]);
+        assert!(!s.stacked);
+        // The UI reads `type`, not the Rust field name.
+        assert_eq!(serde_json::to_value(&s).unwrap()["type"], "line");
+    }
+
+    #[test]
+    fn chart_spec_refuses_charts_the_ui_cannot_draw() {
+        for (args, want) in [
+            (json!({"type": "radar", "x": "a", "y": ["b"]}), "\"type\""),
+            (json!({"type": "bar", "x": "a", "y": []}), "\"y\""),
+            (json!({"type": "bar", "x": "a", "y": [""]}), "\"y\""),
+            (json!({"type": "pie", "x": "a", "y": ["b", "c"]}), "pie"),
+            (
+                json!({"type": "pie", "x": "a", "y": ["b"], "series": "c"}),
+                "pie",
+            ),
+            (
+                json!({"type": "line", "x": "a", "y": ["b", "c"], "series": "d"}),
+                "series",
+            ),
+            (
+                json!({"type": "bar", "x": "a", "y": ["1","2","3","4","5","6","7","8","9"]}),
+                "at most 8",
+            ),
+        ] {
+            let e = chart_spec(&chart_args(args.clone())).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidInput, "{args}");
+            assert!(e.message.contains(want), "{args}: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn missing_chart_column_names_the_result_columns() {
+        let spec = chart_spec(&chart_args(
+            json!({"type": "bar", "x": "month", "y": ["revenue"], "series": "region"}),
+        ))
+        .unwrap();
+        let cols = [
+            "month".to_string(),
+            "total".to_string(),
+            "region".to_string(),
+        ];
+        let e = check_columns(&spec, &cols).unwrap_err();
+        // Own message, so it reaches the model under `schema` privacy and the model can fix it.
+        assert!(OWN_MESSAGE_CODES.contains(&e.code));
+        assert_eq!(
+            e.message,
+            "The result has no column \"revenue\". Its columns: \"month\", \"total\", \"region\""
+        );
+        let cols = [
+            "month".to_string(),
+            "revenue".to_string(),
+            "region".to_string(),
+        ];
+        assert!(check_columns(&spec, &cols).is_ok());
     }
 }

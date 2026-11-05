@@ -47,13 +47,18 @@ export interface TestResult {
   latencyMs: number;
 }
 
+/** `matview`: a PG materialized view. */
+export type TableKind = 'table' | 'view' | 'matview';
+
 export interface TableInfo {
   name: string;
-  kind: 'table' | 'view';
+  kind: TableKind;
   /** Server statistics, not an exact count. */
   rowEstimate?: number;
   /** SQLite only: the table has an implicit rowid. */
   hasRowid?: boolean;
+  /** PG only: the parent table when this table is a partition; `schema.name` when the parent is in another schema. */
+  partitionOf?: string;
 }
 
 export interface ColumnInfo {
@@ -115,7 +120,7 @@ export interface SnapshotTable {
   /** PG schema; absent on MySQL and SQLite. */
   schema?: string;
   name: string;
-  kind: 'table' | 'view';
+  kind: TableKind;
   columns: { name: string; dataType: string }[];
 }
 
@@ -180,6 +185,51 @@ export interface RunRequest {
   limit: number;
   /** Editor tab that runs the query. On a writable Production connection the run executes in the tab's session until commit or rollback. */
   tabId?: string;
+  /** Sorts the full query result before the row limit is applied. */
+  sort?: ResultSort;
+}
+
+export interface ResultSort {
+  column: string;
+  /** Zero-based result column index; databases sort by this ordinal. */
+  columnIndex: number;
+  ascending: boolean;
+}
+
+export interface EditableRequest {
+  connId: string;
+  database: string;
+  sql: string;
+}
+
+export interface EditableResult {
+  table?: string;
+  schema?: string;
+  pk: string[];
+  reason?: string;
+}
+
+export interface EditOperation {
+  key: string;
+  kind: 'update' | 'insert' | 'delete';
+  pk: Record<string, CellValue>;
+  set: Record<string, CellValue>;
+}
+
+export interface ApplyEditsRequest extends EditableRequest {
+  tabId?: string;
+  operations: EditOperation[];
+}
+
+/** One cell of an editable result, found by its primary-key values. */
+export interface CellValueRequest extends EditableRequest {
+  tabId?: string;
+  pk: Record<string, CellValue>;
+  column: string;
+}
+
+export interface ApplyEditsResult {
+  failed?: { index: number; message: string };
 }
 
 /** A tab's session on its connection. Only writable Production connections open one. */
@@ -252,18 +302,36 @@ export interface AiTestResult {
   modelCount: number;
 }
 
-export interface ChatRequest {
-  chatId: string;
+/** One database of a chat. */
+export interface ChatSource {
   connId: string;
   /** null: the connection's own database. */
   database: string | null;
   /** PG schema that `list_tables` and `describe_table` use by default; null: `public`. */
   schema: string | null;
+  /** Write mode for this database. `propose_write` also needs a connection that is not read-only. It never runs SQL. */
+  allowWrites: boolean;
+}
+
+export interface ChatRequest {
+  chatId: string;
+  /** 1 to 8 databases. The model names them `db1`, `db2`, … in this order. */
+  sources: ChatSource[];
   /** Earlier turns, oldest first, without `message`. */
   history: { role: 'user' | 'assistant'; content: string }[];
   message: string;
-  /** Write mode of the chat panel. `propose_write` also needs a connection that is not read-only. It never runs SQL. */
-  allowWrites: boolean;
+}
+
+export type ChartType = 'bar' | 'line' | 'area' | 'pie' | 'scatter';
+/** A chart the model asked for. `x`, `y` and `series` are columns of the result. */
+export interface ChartSpec {
+  type: ChartType;
+  title?: string;
+  x: string;
+  y: string[];
+  /** Splits the one `y` column into one series per distinct value. */
+  series?: string;
+  stacked: boolean;
 }
 
 /** One streamed step of a chat reply. Every stream ends with exactly one `done` or `error`. */
@@ -284,6 +352,8 @@ export type ChatEvent =
     }
   /** Sent before the matching `tool_result` when the proposed write is allowed. */
   | { type: 'write_preview'; id: string; sql: string; info: WriteInfo }
+  /** Sent before the matching `tool_result` of a `render_chart` call. At most 1000 rows, for this UI only. */
+  | { type: 'chart'; id: string; spec: ChartSpec; columns: string[]; rows: CellValue[][]; truncated: boolean }
   | { type: 'error'; error: AppErrorBody }
   | { type: 'done' };
 
@@ -364,6 +434,12 @@ export interface Backend {
   schemaSnapshot(connId: string, database: string): Promise<SchemaSnapshot>;
   /** Runs every statement in `sql` on one connection; fails with code `cancelled` after `cancelQuery`. */
   runQuery(request: RunRequest): Promise<QueryRun>;
+  /** Resolves the source table and primary key of a simple single-table SELECT. */
+  editableResult(request: EditableRequest): Promise<EditableResult>;
+  /** Applies all grid operations atomically; a database failure identifies its operation. */
+  applyEdits(request: ApplyEditsRequest): Promise<ApplyEditsResult>;
+  /** The full text of a cell that the grid shows cut off (PostGIS geometry as WKT); `null` for NULL. */
+  cellValue(request: CellValueRequest): Promise<string | null>;
   cancelQuery(queryId: string): Promise<void>;
   /** `done`/`total` while the run is in progress; `null` for an unknown or finished id. */
   queryProgress(queryId: string): Promise<QueryProgress | null>;
@@ -383,6 +459,8 @@ export interface Backend {
   tableDdl(connId: string, database: string, schema: string | null, table: string): Promise<string>;
   /** Tauri only: asks for a file in a native save dialog and writes the table's DDL to it; with `data`, INSERT statements for every row follow. */
   exportTableSql(connId: string, database: string, schema: string | null, table: string, data: boolean): Promise<ExportResult>;
+  /** Tauri only: asks for a file in a native save dialog and writes the PDF to it. `name` is the suggested ASCII file name. Resolves to the path, or null when the user closed the dialog. Other transports download in the browser. */
+  savePdf(name: string, pdf: Uint8Array): Promise<string | null>;
   /** Checks SQL against the AI read guard without running it. */
   guardCheck(engine: Engine, sql: string): Promise<GuardCheck>;
   /** Describes a proposed write for the approval preview. Never runs it. */

@@ -1,7 +1,7 @@
-import type { TabStatus } from './api';
+import type { ResultSort, TabStatus } from './api';
 import type { QueryResult } from './mock';
 import { active, type Conn } from './state.svelte';
-import type { TableRef } from './tableActions';
+import type { TableFilter, TableRef } from './tableActions';
 
 /** An editor tab. `id` is also the backend `tabId` of its session. */
 export interface Tab {
@@ -19,7 +19,13 @@ export interface Tab {
   status: TabStatus | null;
   /** Set on a table tab (double-click or ⌘-click in the tree): it shows the table's data or properties, not the editor. */
   table: TableRef | null;
+  /** Structured filters for the table Data view. */
+  filters: TableFilter[];
+  /** Database-side sort shared by table and query results. */
+  sort?: ResultSort;
   view: 'data' | 'properties';
+  /** The saved query this tab edits; ⌘S writes to it. */
+  savedId: string | null;
 }
 
 // state.svelte.ts imports this module too; neither touches the other at load time, so the cycle is safe.
@@ -54,7 +60,9 @@ export function newTab(query = ''): Tab {
     opened: null,
     status: null,
     table: null,
+    filters: [],
     view: 'data',
+    savedId: null,
   });
   // The pushed proxy, so callers mutate the stored tab.
   const t = tabs.list[tabs.list.length - 1];

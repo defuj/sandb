@@ -1,5 +1,5 @@
-import { ApiError, type Backend, type Connection, type ConnectionInput, type Engine, type StatementResult, type CellValue, type GuardCheck, type WriteInfo, type ForeignKeyInfo, type TableProperties, type AiSettings } from './types';
-import { schemas, nsOf, pkOf, colType, runMock, statementKind } from '../mock';
+import { ApiError, type Backend, type Connection, type ConnectionInput, type Engine, type StatementResult, type CellValue, type GuardCheck, type WriteInfo, type ForeignKeyInfo, type TableProperties, type AiSettings, type EditableResult } from './types';
+import { schemas, nsOf, pkOf, colType, runMock, statementKind, tableData } from '../mock';
 
 // In-memory backend: the prototype behaviour, used when there is neither Tauri nor the dev bridge.
 
@@ -133,8 +133,25 @@ function mockProperties(c: Connection, table: string): TableProperties {
   };
 }
 
+function mockEditable(c: Connection, sql: string): EditableResult {
+  const r = runMock(sql, mockSchema(c), c);
+  if (r.error || !r.table) return { pk: [], reason: r.error ?? 'Run a SELECT to edit its rows' };
+  const clean = sql.replace(/--.*$/gm, '');
+  const table = r.table;
+  const pk = pkOf(table);
+  let reason: string | undefined;
+  if (/^\s*with\b/i.test(clean) || /\bunion\b/i.test(clean)) reason = 'Read-only: result is not from a single table';
+  else if (/\bjoin\b/i.test(clean) || /\bfrom\s+[\w.]+(\s+\w+)?\s*,/i.test(clean)) reason = 'Read-only: result joins several tables';
+  else if (/\b(group\s+by|distinct)\b|\b(count|sum|avg|min|max)\s*\(/i.test(clean)) reason = 'Read-only: result has aggregates';
+  const list = clean.match(/select\s+([\s\S]*?)\s+from\s/i)?.[1]?.trim() ?? '';
+  if (!reason && list !== '*' && !/^\w+(\s*,\s*\w+)*$/.test(list)) reason = 'Read-only: result has computed columns';
+  const cols = list === '*' ? r.columns : list.split(/\s*,\s*/);
+  if (!reason && !pk.every((k) => cols.includes(k))) reason = `Read-only: primary key (${pk.join(', ')}) is not in the result`;
+  return { table, schema: nsOf(c.engine, table), pk, reason };
+}
+
 // The demo build keeps the AI settings in memory and never calls a model.
-let aiSettings: AiSettings = { provider: 'ollama', baseUrl: 'http://localhost:11434/v1', model: 'llama3.1:8b', privacy: 'results', maxRows: 500, timeoutSec: 15 };
+let aiSettings: AiSettings = { provider: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'llama3.1:8b', privacy: 'results', maxRows: 500, timeoutSec: 15 };
 let aiKey = '';
 const noAi = () => new ApiError({ code: 'invalid_input', message: 'The demo build has no AI backend. Use the desktop app or the dev bridge.' });
 
@@ -207,7 +224,7 @@ export const mockBackend: Backend = {
       tables: Object.entries(s).map(([name, cols]) => ({ schema: c.engine === 'pg' ? nsOf(c.engine, name) : undefined, name, kind: 'table' as const, columns: cols.map((col) => ({ name: col, dataType: colType(s, name, col) })) })),
     };
   },
-  async runQuery({ connId, sql, limit, tabId }) {
+  async runQuery({ connId, sql, limit, tabId, sort }) {
     const c = find(connId);
     const s = mockSchema(c);
     const parts = sql.split(';').map((p) => p.trim()).filter((p) => statementKind(p) !== 'empty');
@@ -226,7 +243,7 @@ export const mockBackend: Backend = {
     let total = 0;
     try {
       for (const [i, part] of parts.entries()) {
-        const r = runMock(part, s, c);
+        const r = runMock(part, s, c, { limit, sort });
         if (r.error) throw new ApiError({ code: 'database', message: parts.length > 1 ? `Statement ${i + 1} of ${parts.length}: ${r.error}` : r.error });
         if (/^(commit|rollback|end)\b/i.test(bare(part))) pending = false;
         else if (statementKind(part) === 'write' && !control(part)) pending = true;
@@ -251,6 +268,56 @@ export const mockBackend: Backend = {
       }
     }
     return { statements, elapsedMs: total };
+  },
+  async editableResult({ connId, sql }) {
+    return mockEditable(find(connId), sql);
+  },
+  async applyEdits({ connId, sql, tabId, operations }) {
+    const c = find(connId);
+    if (c.readOnly) throw new ApiError({ code: 'connection_read_only', message: `Connection "${c.name}" is read-only: writes are refused` });
+    const meta = mockEditable(c, sql);
+    if (meta.reason || !meta.table) throw new ApiError({ code: 'invalid_input', message: meta.reason ?? 'Result is not editable' });
+    const d = tableData(mockSchema(c), meta.table);
+    const base = d.base.map((r) => ({ ...r }));
+    const added = d.added.map((r) => ({ ...r }));
+    const lists = [base, added];
+    const findRow = (pk: Record<string, CellValue>) => {
+      for (const rows of lists) {
+        const index = rows.findIndex((r) => meta.pk.every((k) => r[k] === pk[k]));
+        if (index >= 0) return { rows, index };
+      }
+      return null;
+    };
+    for (const [index, op] of operations.entries()) {
+      if (op.kind !== 'delete' && meta.pk.some((k) => k in op.set && (op.set[k] === null || op.set[k] === ''))) {
+        return { failed: { index, message: 'A primary-key column cannot be NULL. Transaction rolled back, nothing was saved.' } };
+      }
+      if (op.kind === 'insert') {
+        if (meta.pk.some((k) => op.set[k] !== undefined) && findRow(Object.fromEntries(meta.pk.map((k) => [k, op.set[k] ?? null])))) {
+          return { failed: { index, message: 'Duplicate primary key. Transaction rolled back, nothing was saved.' } };
+        }
+        added.push({ ...op.set });
+        continue;
+      }
+      const found = findRow(op.pk);
+      if (!found) return { failed: { index, message: 'The row no longer exists. Transaction rolled back, nothing was saved.' } };
+      if (op.kind === 'delete') found.rows.splice(found.index, 1);
+      else found.rows[found.index] = { ...found.rows[found.index], ...op.set };
+    }
+    d.base = base;
+    d.added = added;
+    if (tabId && c.env === 'production') sessions.set(tabId, { connId });
+    return {};
+  },
+  // Mock values are never cut off, so the stored value is already the full one.
+  async cellValue({ connId, sql, pk, column }) {
+    const meta = mockEditable(find(connId), sql);
+    if (meta.reason || !meta.table) throw new ApiError({ code: 'invalid_input', message: meta.reason ?? 'Result is not editable' });
+    const d = tableData(mockSchema(find(connId)), meta.table);
+    const row = [...d.base, ...d.added].find((r) => meta.pk.every((k) => r[k] === pk[k]));
+    if (!row) throw new ApiError({ code: 'not_found', message: 'The row no longer exists or its primary key changed' });
+    const v = row[column];
+    return v === null || v === undefined ? null : typeof v === 'object' ? JSON.stringify(v) : String(v);
   },
   async cancelQuery() {},
   // Mock runs are instant; a run always finishes before progress could be polled.
@@ -285,6 +352,9 @@ export const mockBackend: Backend = {
   },
   async exportTableSql() {
     throw new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' });
+  },
+  async savePdf() {
+    throw new ApiError({ code: 'invalid_input', message: 'Saving a PDF to a file needs the desktop app' });
   },
   async guardCheck(_engine, sql) {
     return mockGuard(sql);

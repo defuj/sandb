@@ -1,6 +1,6 @@
 //! Thin `#[tauri::command]` adapters over the core.
 
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -8,6 +8,9 @@ use crate::core::ai::session::{self as chat, ChatEvent, ChatRequest};
 use crate::core::ai::settings::{self as ai_settings, AiSettings, AiSettingsView, AiTestResult};
 use crate::core::connections::{self, Connection, ConnectionInput, Engine, TestResult};
 use crate::core::db::dump::{self, TableExportRequest};
+use crate::core::db::edit::{
+    self, ApplyEditsRequest, ApplyEditsResult, CellValueRequest, EditableRequest, EditableResult,
+};
 use crate::core::db::export::{self, ExportRequest, ExportResult};
 use crate::core::db::introspect::{self, ColumnInfo, SchemaSnapshot, TableInfo, TableProperties};
 use crate::core::db::query::{self, QueryProgress, QueryRun, RunRequest};
@@ -139,6 +142,30 @@ pub async fn schema_snapshot(
 #[tauri::command]
 pub async fn run_query(state: State<'_, AppState>, request: RunRequest) -> Res<QueryRun> {
     query::run(&state, request).await
+}
+
+#[tauri::command]
+pub async fn editable_result(
+    state: State<'_, AppState>,
+    request: EditableRequest,
+) -> Res<EditableResult> {
+    edit::editable_result(&state, request).await
+}
+
+#[tauri::command]
+pub async fn apply_edits(
+    state: State<'_, AppState>,
+    request: ApplyEditsRequest,
+) -> Res<ApplyEditsResult> {
+    edit::apply_edits(&state, request).await
+}
+
+#[tauri::command]
+pub async fn cell_value(
+    state: State<'_, AppState>,
+    request: CellValueRequest,
+) -> Res<Option<String>> {
+    edit::cell_value(&state, request).await
 }
 
 #[tauri::command]
@@ -324,4 +351,39 @@ pub async fn export_table_sql(
         .into_path()
         .map_err(|e| AppError::invalid("Choose a file to export to").with_detail(e.to_string()))?;
     dump::export_table_sql(&state, request, &path).await
+}
+
+/// Writes a PDF the UI built to a file from a native save dialog. The body is the raw PDF bytes;
+/// the `x-file-name` header is the suggested name. Returns the path, or `None` when the user
+/// closed the dialog.
+#[tauri::command]
+pub async fn save_pdf(app: AppHandle, request: Request<'_>) -> Res<Option<String>> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(AppError::invalid("The PDF must be sent as raw bytes"));
+    };
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(AppError::invalid("The data is not a PDF"));
+    }
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .filter(|n| n.ends_with(".pdf") && !n.contains(['/', '\\']))
+        .unwrap_or("report.pdf");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(name)
+        .add_filter("PDF", &["pdf"])
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| AppError::invalid("Choose a file to save to").with_detail(e.to_string()))?;
+    tokio::fs::write(&path, bytes).await?;
+    Ok(Some(path.display().to_string()))
 }

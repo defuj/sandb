@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::ai::client::AiClient;
+use crate::core::ai::client::{AiClient, Api};
 use crate::core::error::{AppError, ErrorCode};
 use crate::core::state::AppState;
 
@@ -30,9 +30,10 @@ pub enum Privacy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettings {
-    /// Free label of the server kind (`ollama`, `openai`, …); the client is the same for all.
+    /// Wire format: `anthropic` for an Anthropic-compatible server, `openai` for an
+    /// OpenAI-compatible one. Older files hold other labels (`ollama`, `custom`, …); they load as `openai`.
     pub provider: String,
-    /// OpenAI-compatible API root, e.g. `http://localhost:11434/v1`. No trailing `/`.
+    /// API root, e.g. `http://localhost:11434/v1`. No trailing `/`.
     pub base_url: String,
     pub model: String,
     pub privacy: Privacy,
@@ -45,7 +46,7 @@ pub struct AiSettings {
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
-            provider: "ollama".into(),
+            provider: "openai".into(),
             base_url: "http://localhost:11434/v1".into(),
             model: "llama3.1:8b".into(),
             privacy: Privacy::Results,
@@ -72,9 +73,22 @@ pub struct AiTestResult {
 }
 
 impl AiSettings {
+    pub fn api(&self) -> Api {
+        if self.provider == "anthropic" {
+            Api::Anthropic
+        } else {
+            Api::OpenAi
+        }
+    }
+
     /// Trims the text fields and checks the limits. The base URL loses its trailing `/`.
+    /// Any provider other than `anthropic` becomes `openai`.
     pub fn normalized(mut self) -> Result<Self, AppError> {
-        self.provider = self.provider.trim().to_string();
+        self.provider = match self.provider.trim() {
+            "anthropic" => "anthropic",
+            _ => "openai",
+        }
+        .to_string();
         self.model = self.model.trim().to_string();
         self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
         if !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://")) {
@@ -143,7 +157,7 @@ pub async fn test(
         None => stored_key(state)?,
         Some(k) => Some(k.trim().to_string()).filter(|k| !k.is_empty()),
     };
-    let client = AiClient::new(&settings.base_url, key)?;
+    let client = AiClient::new(settings.api(), &settings.base_url, key)?;
     let started = Instant::now();
     let models = client.list_models().await?;
     let latency_ms = started.elapsed().as_millis() as u64;
@@ -261,7 +275,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({
-                "provider": "ollama",
+                "provider": "openai",
                 "baseUrl": "http://localhost:11434/v1",
                 "model": "llama3.1:8b",
                 "privacy": "results",

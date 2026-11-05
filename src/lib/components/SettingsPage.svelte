@@ -15,8 +15,6 @@
 
   const keyNote = { tauri: 'Stored encrypted on this computer.', bridge: 'Kept in memory while the dev bridge runs.', mock: 'Demo build: no AI backend.' }[api.kind];
 
-  const p = $derived(providers[ai.provider]);
-
   function changed() {
     testSeq++;
     test = 'idle';
@@ -29,12 +27,12 @@
     saveAiKeySoon();
   }
 
+  // Switching keeps a URL and model the user typed; only empty fields or the other preset's values change.
   function pick(id: Provider) {
+    const other = providers[ai.provider];
     ai.provider = id;
-    if (id !== 'custom') {
-      ai.baseUrl = providers[id].url;
-      ai.model = providers[id].model;
-    }
+    if (!ai.baseUrl.trim() || ai.baseUrl === other.url) ai.baseUrl = providers[id].url;
+    if (!ai.model.trim() || ai.model === other.model) ai.model = providers[id].model;
     changed();
   }
 
@@ -84,7 +82,7 @@
       <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
         <div>
           <h2 class="flex items-center gap-2 text-[13px] font-semibold"><Bot size={14} class="text-faint" /> AI provider</h2>
-          <p class="mt-1 text-[12.5px] leading-relaxed text-muted">Any OpenAI-compatible endpoint. Your key stays on this computer.</p>
+          <p class="mt-1 text-[12.5px] leading-relaxed text-muted">Any OpenAI-compatible or Anthropic-compatible endpoint. Your key stays on this computer.</p>
         </div>
         <div class="min-w-0">
           <div class="seg flex-wrap">
@@ -96,14 +94,14 @@
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block sm:col-span-2">
               <span class="label mb-1.5 block">Base URL</span>
-              <input class="input font-mono text-[12.5px]" bind:value={ai.baseUrl} oninput={changed} placeholder="https://host/v1" />
+              <input class="input font-mono text-[12.5px]" bind:value={ai.baseUrl} oninput={changed} placeholder={providers[ai.provider].url} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" />
             </label>
             <label class="block">
-              <span class="label mb-1.5 flex items-center gap-1">API key {#if !p.needsKey}<span>(optional)</span>{/if}
-                {#if ai.hasKey}<button class="ml-auto rounded px-1 font-medium text-muted hover:bg-hover hover:text-red-600 dark:hover:text-red-400" onclick={removeKey} title="Delete the saved key">Remove</button>{/if}
+              <span class="label mb-1.5 flex min-w-0 items-center gap-1 whitespace-nowrap">API key <span class="min-w-0 truncate font-normal text-faint" title="Optional for local servers">(optional for local servers)</span>
+                {#if ai.hasKey}<button class="ml-auto shrink-0 rounded px-1 font-medium text-muted hover:bg-hover hover:text-red-600 dark:hover:text-red-400" onclick={removeKey} title="Delete the saved key">Remove</button>{/if}
               </span>
               <div class="relative">
-                <input class="input pr-9 font-mono text-[12.5px]" type={showKey ? 'text' : 'password'} bind:value={ai.apiKey} oninput={keyChanged} placeholder={ai.hasKey ? 'Saved key is hidden. Type to replace it.' : p.needsKey ? 'sk-…' : 'Not needed for local models'} />
+                <input class="input pr-9 font-mono text-[12.5px]" type={showKey ? 'text' : 'password'} bind:value={ai.apiKey} oninput={keyChanged} placeholder={ai.hasKey ? '•••••••• (saved)' : ai.provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'} title={ai.hasKey ? 'Saved key is hidden. Type to replace it.' : undefined} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" />
                 <button class="absolute inset-y-0 right-1 grid w-7 place-items-center text-faint hover:text-ink" onclick={() => (showKey = !showKey)} aria-label={showKey ? 'Hide key' : 'Show key'}>
                   {#if showKey}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
                 </button>
@@ -111,7 +109,7 @@
             </label>
             <label class="block">
               <span class="label mb-1.5 block">Model</span>
-              <input class="input font-mono text-[12.5px]" bind:value={ai.model} oninput={changed} placeholder="model-name" />
+              <input class="input font-mono text-[12.5px]" bind:value={ai.model} oninput={changed} placeholder={providers[ai.provider].model} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" />
             </label>
           </div>
 

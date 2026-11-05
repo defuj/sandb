@@ -1,4 +1,6 @@
-//! OpenAI-compatible HTTP client: `GET /models` and a streaming `POST /chat/completions`.
+//! AI HTTP client for two wire formats. OpenAI-compatible: `GET /models` and a streaming
+//! `POST /chat/completions`. Anthropic-compatible: `GET /models` and a streaming `POST /messages`.
+//! The caller always builds an OpenAI chat body; the Anthropic path translates it.
 //! Every error leaves out the API key, also when the server echoes it back.
 
 use std::time::Duration;
@@ -7,7 +9,7 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{AppError, ErrorCode};
@@ -25,6 +27,18 @@ const ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 /// Highest tool call index accepted in one answer.
 const MAX_TOOL_CALLS: usize = 64;
+/// `anthropic-version` header of every Anthropic request.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Anthropic requires `max_tokens`; this leaves room for a long report.
+const ANTHROPIC_MAX_TOKENS: u32 = 8192;
+
+/// The wire format of the AI server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Api {
+    #[default]
+    OpenAi,
+    Anthropic,
+}
 
 /// One tool call of a model answer. `arguments` is the raw JSON text the model sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,14 +58,16 @@ pub struct Completion {
 
 pub struct AiClient {
     http: reqwest::Client,
+    api: Api,
     base: String,
     key: Option<String>,
     idle: Duration,
 }
 
 impl AiClient {
-    /// `base_url`: the API root without a trailing `/`. `key`: sent as a bearer token when present.
-    pub fn new(base_url: &str, key: Option<String>) -> Result<Self, AppError> {
+    /// `base_url`: the API root without a trailing `/`. `key`: sent as a bearer token
+    /// (OpenAI) or as `x-api-key` (Anthropic) when present.
+    pub fn new(api: Api, base_url: &str, key: Option<String>) -> Result<Self, AppError> {
         // reqwest is built without a bundled crypto provider; use ring, as sqlx and the updater
         // do. An error only means a provider is already installed.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -63,6 +79,7 @@ impl AiClient {
             })?;
         Ok(Self {
             http,
+            api,
             base: base_url.trim_end_matches('/').to_string(),
             key: key.filter(|k| !k.is_empty()),
             idle: DEFAULT_IDLE_TIMEOUT,
@@ -86,7 +103,12 @@ impl AiClient {
             id: String,
         }
         let work = async {
-            let req = self.auth(self.http.get(format!("{}/models", self.base)));
+            // Anthropic pages the list at 20 by default.
+            let url = match self.api {
+                Api::OpenAi => format!("{}/models", self.base),
+                Api::Anthropic => format!("{}/models?limit=1000", self.base),
+            };
+            let req = self.auth(self.http.get(url));
             let resp = req.send().await.map_err(|e| self.send_error(e))?;
             let resp = self.check_status(resp).await?;
             let bytes = resp.bytes().await.map_err(|e| self.send_error(e))?;
@@ -106,7 +128,7 @@ impl AiClient {
         res.map_err(|e| self.redact(e))
     }
 
-    /// Streams `POST {base}/chat/completions` with `body` (which must ask for `stream: true`).
+    /// Streams the answer to `body`, an OpenAI chat body that asks for `stream: true`.
     /// `on_text` gets each text delta; returning false stops the stream as a cancel does.
     pub async fn chat_stream(
         &self,
@@ -125,11 +147,15 @@ impl AiClient {
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str) -> bool,
     ) -> Result<Completion, AppError> {
+        let (path, body) = match self.api {
+            Api::OpenAi => ("chat/completions", serde_json::to_vec(body)?),
+            Api::Anthropic => ("messages", serde_json::to_vec(&anthropic_body(body))?),
+        };
         let req = self
-            .auth(self.http.post(format!("{}/chat/completions", self.base)))
+            .auth(self.http.post(format!("{}/{path}", self.base)))
             .header(ACCEPT, "text/event-stream")
             .header(CONTENT_TYPE, "application/json")
-            .body(serde_json::to_vec(body)?);
+            .body(body);
         let send = async {
             let resp = req.send().await.map_err(|e| self.send_error(e))?;
             self.check_status(resp).await
@@ -141,7 +167,10 @@ impl AiClient {
         };
         let mut stream = resp.bytes_stream();
         let mut lines = LineBuffer::default();
-        let mut acc = Accumulator::default();
+        let mut acc = Accumulator {
+            api: self.api,
+            ..Default::default()
+        };
         loop {
             let next = tokio::select! {
                 biased;
@@ -182,9 +211,13 @@ impl AiClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.key {
-            Some(k) => req.header(AUTHORIZATION, format!("Bearer {k}")),
-            None => req,
+        match (self.api, &self.key) {
+            (Api::OpenAi, Some(k)) => req.header(AUTHORIZATION, format!("Bearer {k}")),
+            (Api::OpenAi, None) => req,
+            (Api::Anthropic, Some(k)) => req
+                .header("x-api-key", k)
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            (Api::Anthropic, None) => req.header("anthropic-version", ANTHROPIC_VERSION),
         }
     }
 
@@ -331,11 +364,14 @@ fn utf8(line: &[u8]) -> Result<String, AppError> {
 /// Builds the answer from SSE lines.
 #[derive(Default)]
 struct Accumulator {
+    api: Api,
     out: Completion,
+    /// Anthropic: (content block index, tool call position) of each `tool_use` block.
+    tool_blocks: Vec<(u64, usize)>,
 }
 
 impl Accumulator {
-    /// Handles one line. `Ok(true)` at `[DONE]`.
+    /// Handles one line. `Ok(true)` at `[DONE]` (OpenAI) or `message_stop` (Anthropic).
     fn line(
         &mut self,
         line: &str,
@@ -365,6 +401,9 @@ impl Accumulator {
                 "The AI server reported an error during the answer",
             )
             .with_detail(msg));
+        }
+        if self.api == Api::Anthropic {
+            return self.anthropic_event(&v, on_text);
         }
         let Some(choice) = v
             .get("choices")
@@ -447,6 +486,85 @@ impl Accumulator {
         Ok(())
     }
 
+    /// Handles one Anthropic stream event. `Ok(true)` at `message_stop`.
+    fn anthropic_event(
+        &mut self,
+        v: &Value,
+        on_text: &mut impl FnMut(&str) -> bool,
+    ) -> Result<bool, AppError> {
+        let index = v.get("index").and_then(Value::as_u64);
+        let text = match v.get("type").and_then(Value::as_str).unwrap_or("") {
+            "content_block_start" => {
+                let block = &v["content_block"];
+                if block["type"] == "tool_use" {
+                    let Some(index) = index else {
+                        return Err(protocol(
+                            "The AI server sent a malformed tool call",
+                            "tool_use block without index",
+                        ));
+                    };
+                    let calls = &mut self.out.tool_calls;
+                    if calls.len() >= MAX_TOOL_CALLS {
+                        return Err(protocol(
+                            "The AI server sent a malformed tool call",
+                            format!("more than {MAX_TOOL_CALLS} tool calls"),
+                        ));
+                    }
+                    self.tool_blocks.push((index, calls.len()));
+                    calls.push(ToolCall {
+                        id: block["id"].as_str().unwrap_or_default().to_string(),
+                        name: block["name"].as_str().unwrap_or_default().to_string(),
+                        arguments: String::new(),
+                    });
+                    None
+                } else {
+                    block.get("text").and_then(Value::as_str)
+                }
+            }
+            "content_block_delta" => {
+                let delta = &v["delta"];
+                match delta["type"].as_str().unwrap_or("") {
+                    "text_delta" => delta.get("text").and_then(Value::as_str),
+                    "input_json_delta" => {
+                        let slot = self
+                            .tool_blocks
+                            .iter()
+                            .find(|(i, _)| Some(*i) == index)
+                            .map(|&(_, pos)| pos);
+                        let Some(pos) = slot else {
+                            return Err(protocol(
+                                "The AI server sent a malformed tool call",
+                                "input_json_delta for an unknown block",
+                            ));
+                        };
+                        if let Some(part) = delta.get("partial_json").and_then(Value::as_str) {
+                            self.out.tool_calls[pos].arguments.push_str(part);
+                        }
+                        None
+                    }
+                    // Thinking and signature deltas are not part of the answer.
+                    _ => None,
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = v["delta"].get("stop_reason").and_then(Value::as_str) {
+                    self.out.finish_reason = Some(reason.to_string());
+                }
+                None
+            }
+            "message_stop" => return Ok(true),
+            // message_start, content_block_stop, ping.
+            _ => None,
+        };
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            self.out.text.push_str(text);
+            if !on_text(text) {
+                return Err(cancelled());
+            }
+        }
+        Ok(false)
+    }
+
     fn finish(self) -> Result<Completion, AppError> {
         let mut out = self.out;
         for (i, call) in out.tool_calls.iter_mut().enumerate() {
@@ -459,9 +577,89 @@ impl Accumulator {
             if call.id.is_empty() {
                 call.id = format!("call_{i}");
             }
+            // Anthropic streams no input JSON for a tool without arguments.
+            if self.api == Api::Anthropic && call.arguments.trim().is_empty() {
+                call.arguments = "{}".into();
+            }
         }
         Ok(out)
     }
+}
+
+/// Translates an OpenAI chat body to an Anthropic Messages body. System messages become
+/// `system`; assistant tool calls become `tool_use` blocks; tool messages become `tool_result`
+/// blocks. Turns of the same role merge, because Anthropic wants user and assistant to alternate.
+fn anthropic_body(body: &Value) -> Value {
+    let mut system: Vec<&str> = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+    for m in body["messages"].as_array().into_iter().flatten() {
+        let text = m["content"].as_str().unwrap_or("");
+        let (role, blocks) = match m["role"].as_str().unwrap_or("") {
+            "system" => {
+                if !text.is_empty() {
+                    system.push(text);
+                }
+                continue;
+            }
+            "tool" => (
+                "user",
+                vec![
+                    json!({"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": text}),
+                ],
+            ),
+            "assistant" => {
+                let mut blocks = Vec::new();
+                if !text.is_empty() {
+                    blocks.push(json!({"type": "text", "text": text}));
+                }
+                for c in m["tool_calls"].as_array().into_iter().flatten() {
+                    let input = c["function"]["arguments"]
+                        .as_str()
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| json!({}));
+                    blocks.push(json!({"type": "tool_use", "id": c["id"], "name": c["function"]["name"], "input": input}));
+                }
+                ("assistant", blocks)
+            }
+            _ if text.is_empty() => continue,
+            _ => ("user", vec![json!({"type": "text", "text": text})]),
+        };
+        if blocks.is_empty() {
+            continue;
+        }
+        match messages.last_mut() {
+            Some(last) if last["role"] == role => {
+                if let Some(content) = last["content"].as_array_mut() {
+                    content.extend(blocks);
+                }
+            }
+            _ => messages.push(json!({"role": role, "content": blocks})),
+        }
+    }
+    let tools: Vec<Value> = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            let f = &t["function"];
+            json!({"name": f["name"], "description": f["description"], "input_schema": f["parameters"]})
+        })
+        .collect();
+    let mut out = json!({
+        "model": body["model"],
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "stream": true,
+        "messages": messages,
+    });
+    if !system.is_empty() {
+        out["system"] = json!(system.join("\n\n"));
+    }
+    if !tools.is_empty() {
+        out["tools"] = json!(tools);
+        out["tool_choice"] = json!({"type": "auto"});
+    }
+    out
 }
 
 #[cfg(test)]
@@ -562,7 +760,7 @@ pub(crate) mod tests {
     }
 
     async fn run(base: &str, key: Option<&str>) -> (Result<Completion, AppError>, Vec<String>) {
-        let client = AiClient::new(base, key.map(String::from))
+        let client = AiClient::new(Api::OpenAi, base, key.map(String::from))
             .unwrap()
             .with_idle_timeout(Duration::from_millis(500));
         let mut deltas = Vec::new();
@@ -603,6 +801,105 @@ pub(crate) mod tests {
         assert!(req.starts_with("POST /v1/chat/completions "), "{req}");
         assert!(req.contains("authorization: Bearer sk-test"), "{req}");
         assert!(req.contains(r#""stream":true"#), "{req}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_translates_the_body_and_assembles_text_and_tool_calls() {
+        let ev = |v: Value| {
+            (
+                0,
+                format!("event: {}\ndata: {v}\n\n", v["type"].as_str().unwrap()),
+            )
+        };
+        let script = vec![
+            head("200 OK", "text/event-stream"),
+            ev(json!({"type": "message_start", "message": {"id": "msg_1"}})),
+            ev(
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ),
+            ev(
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Look"}}),
+            ),
+            ev(json!({"type": "ping"})),
+            ev(
+                json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "run_read_query", "input": {}}}),
+            ),
+            ev(
+                json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"sql\": \"SEL"}}),
+            ),
+            ev(
+                json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "ECT 1\"}"}}),
+            ),
+            ev(
+                json!({"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "toolu_2", "name": "list_tables", "input": {}}}),
+            ),
+            ev(json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})),
+            ev(json!({"type": "message_stop"})),
+        ];
+        let (base, mut reqs) = serve(script).await;
+        let client = AiClient::new(Api::Anthropic, &base, Some("sk-ant".into())).unwrap();
+        // A second step: the earlier tool call and its result must reach Anthropic as blocks.
+        let body = json!({
+            "model": "claude", "stream": true, "tool_choice": "auto",
+            "tools": [{"type": "function", "function": {"name": "list_tables", "description": "d", "parameters": {"type": "object"}}}],
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "a", "type": "function", "function": {"name": "list_tables", "arguments": ""}},
+                    {"id": "b", "type": "function", "function": {"name": "list_tables", "arguments": "{\"schema\":\"x\"}"}},
+                ]},
+                {"role": "tool", "tool_call_id": "a", "content": "r1"},
+                {"role": "tool", "tool_call_id": "b", "content": "r2"},
+            ],
+        });
+        let c = client
+            .chat_stream(&body, &CancellationToken::new(), |_| true)
+            .await
+            .unwrap();
+        assert_eq!(c.text, "Look");
+        assert_eq!(c.finish_reason.as_deref(), Some("tool_use"));
+        assert_eq!(
+            c.tool_calls,
+            vec![
+                ToolCall {
+                    id: "toolu_1".into(),
+                    name: "run_read_query".into(),
+                    arguments: r#"{"sql": "SELECT 1"}"#.into()
+                },
+                ToolCall {
+                    id: "toolu_2".into(),
+                    name: "list_tables".into(),
+                    arguments: "{}".into()
+                },
+            ]
+        );
+        let req = reqs.recv().await.unwrap();
+        assert!(req.starts_with("POST /v1/messages "), "{req}");
+        assert!(req.contains("x-api-key: sk-ant"), "{req}");
+        assert!(req.contains("anthropic-version: 2023-06-01"), "{req}");
+        assert!(!req.to_ascii_lowercase().contains("authorization"), "{req}");
+        let sent: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "model": "claude", "max_tokens": ANTHROPIC_MAX_TOKENS, "stream": true, "system": "sys",
+                "tools": [{"name": "list_tables", "description": "d", "input_schema": {"type": "object"}}],
+                "tool_choice": {"type": "auto"},
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "a", "name": "list_tables", "input": {}},
+                        {"type": "tool_use", "id": "b", "name": "list_tables", "input": {"schema": "x"}},
+                    ]},
+                    // Both results in one user turn: Anthropic wants the roles to alternate.
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "a", "content": "r1"},
+                        {"type": "tool_result", "tool_use_id": "b", "content": "r2"},
+                    ]},
+                ],
+            })
+        );
     }
 
     #[tokio::test]
@@ -816,7 +1113,7 @@ pub(crate) mod tests {
             (3_000, done().1),
         ];
         let (base, _r) = serve(script).await;
-        let client = AiClient::new(&base, None).unwrap();
+        let client = AiClient::new(Api::OpenAi, &base, None).unwrap();
         let token = CancellationToken::new();
         let t = token.clone();
         let started = std::time::Instant::now();
@@ -840,7 +1137,7 @@ pub(crate) mod tests {
             done(),
         ];
         let (base, _r) = serve(script).await;
-        let client = AiClient::new(&base, None).unwrap();
+        let client = AiClient::new(Api::OpenAi, &base, None).unwrap();
         let mut n = 0;
         let e = client
             .chat_stream(&body(), &CancellationToken::new(), |_| {
@@ -878,7 +1175,7 @@ pub(crate) mod tests {
                 let _ = sock.shutdown().await;
             }
         });
-        let client = AiClient::new(&format!("https://{addr}/v1"), None).unwrap();
+        let client = AiClient::new(Api::OpenAi, &format!("https://{addr}/v1"), None).unwrap();
         let e = client.list_models().await.unwrap_err();
         assert_eq!(e.code, ErrorCode::ConnectFailed, "{e:?}");
     }
@@ -894,7 +1191,7 @@ pub(crate) mod tests {
             ),
         ];
         let (base, mut reqs) = serve(script).await;
-        let client = AiClient::new(&format!("{base}/"), Some("k1".into())).unwrap();
+        let client = AiClient::new(Api::OpenAi, &format!("{base}/"), Some("k1".into())).unwrap();
         assert_eq!(client.list_models().await.unwrap(), vec!["a", "b"]);
         let req = reqs.recv().await.unwrap();
         assert!(req.starts_with("GET /v1/models "), "{req}");
@@ -905,7 +1202,7 @@ pub(crate) mod tests {
     async fn bad_model_list_is_ai_protocol() {
         let script = vec![head("200 OK", "application/json"), (0, "[1, 2]".into())];
         let (base, _r) = serve(script).await;
-        let e = AiClient::new(&base, None)
+        let e = AiClient::new(Api::OpenAi, &base, None)
             .unwrap()
             .list_models()
             .await

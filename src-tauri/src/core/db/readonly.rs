@@ -733,6 +733,7 @@ mod tests {
                 query_id: uuid::Uuid::new_v4().to_string(),
                 limit: None,
                 tab_id: None,
+                sort: None,
             },
         )
         .await

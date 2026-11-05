@@ -7,7 +7,7 @@ use tauri::menu::{Menu, MenuItem, MenuItemKind, WINDOW_SUBMENU_ID};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 
-use crate::core::secrets::FileStore;
+use crate::core::secrets::{self, KeychainStore};
 use crate::core::state::AppState;
 
 const QUIT_ID: &str = "sandb-quit";
@@ -76,12 +76,23 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            let dir = match std::env::var_os("SANDB_DATA_DIR") {
-                Some(d) => PathBuf::from(d),
-                None => app.path().app_data_dir()?,
+            let custom_dir = std::env::var_os("SANDB_DATA_DIR").map(PathBuf::from);
+            // The credential store is shared by the whole OS account. A custom data dir gets its
+            // own service name, so its secrets never mix with those of the real app data.
+            let (dir, service) = match custom_dir {
+                Some(d) => {
+                    let service = format!("{} ({})", app.config().identifier, d.display());
+                    (d, service)
+                }
+                None => (app.path().app_data_dir()?, app.config().identifier.clone()),
             };
-            let secrets = FileStore::new(&dir);
-            let state = AppState::new(dir, Box::new(secrets))?;
+            let keychain = KeychainStore::new(service);
+            // Not fatal: the file stays and the next start tries again. Until then, the passwords
+            // that were not moved are missing and those connections fail to log in.
+            if let Err(e) = secrets::migrate_legacy_file(&dir, &keychain) {
+                eprintln!("sandb: could not move saved passwords to the credential store: {e}");
+            }
+            let state = AppState::new(dir, Box::new(keychain))?;
             app.manage(state);
             app.set_menu(app_menu(app.handle())?)?;
             Ok(())
@@ -137,6 +148,9 @@ pub fn run() {
             commands::table_ddl,
             commands::export_table_sql,
             commands::run_query,
+            commands::editable_result,
+            commands::apply_edits,
+            commands::cell_value,
             commands::cancel_query,
             commands::query_progress,
             commands::commit_transaction,
@@ -145,6 +159,7 @@ pub fn run() {
             commands::close_tab_session,
             commands::quit_app,
             commands::export_csv,
+            commands::save_pdf,
             commands::guard_check,
             commands::classify_write,
             commands::run_ai_read,

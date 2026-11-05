@@ -1,11 +1,12 @@
 <script lang="ts">
   import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, PanelLeft, CircleArrowUp, PanelBottom } from '@lucide/svelte';
-  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste, ChevronUp, ChevronDown, Table2, Eye, RotateCw } from '@lucide/svelte';
+  import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste, ChevronUp, ChevronDown, Table2, Eye, ScanEye, RotateCw, Save, CopyPlus } from '@lucide/svelte';
   import { tick, untrack } from 'svelte';
   import { ui, db, toggleTheme, active, type Conn } from './lib/state.svelte';
-  import { api, ApiError } from './lib/api';
-  import { schemas, runMock, statementKind, nsOf, type QueryResult, type Schema } from './lib/mock';
-  import { toResult, snapshotSchema, quoteIdent } from './lib/results';
+  import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
+  import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
+  import { schemas, runMock, statementKind, nsOf, type QueryResult, type Row, type Schema } from './lib/mock';
+  import { toResult, snapshotSchema, snapshotKey } from './lib/results';
   import ConnectionTree from './lib/components/ConnectionTree.svelte';
   import ConnectionDialog from './lib/components/ConnectionDialog.svelte';
   import SqlEditor from './lib/components/SqlEditor.svelte';
@@ -14,12 +15,16 @@
   import SafeguardDialog from './lib/components/SafeguardDialog.svelte';
   import SettingsPage from './lib/components/SettingsPage.svelte';
   import AuditPage from './lib/components/AuditPage.svelte';
-  import CommandPalette from './lib/components/CommandPalette.svelte';
+  import CommandPalette, { type PaletteTable } from './lib/components/CommandPalette.svelte';
   import DeleteConnectionDialog from './lib/components/DeleteConnectionDialog.svelte';
   import TargetBar from './lib/components/TargetBar.svelte';
   import TableDangerDialog from './lib/components/TableDangerDialog.svelte';
   import TableProperties from './lib/components/TableProperties.svelte';
-  import { qualified, displayName, selectSql, insertSql, dangerSql, type TableAction, type TableRef, type Danger } from './lib/tableActions';
+  import TableFilterBar from './lib/components/TableFilterBar.svelte';
+  import SavedQueries from './lib/components/SavedQueries.svelte';
+  import SaveQueryDialog from './lib/components/SaveQueryDialog.svelte';
+  import { saved, findSaved, isDirty, suggestName, createSaved, updateSaved, deleteSaved, renameSaved, type SavedQuery, type SaveAsk } from './lib/saved.svelte';
+  import { qualified, displayName, selectSql, insertSql, dangerSql, tableDataSql, type TableAction, type TableRef, type TableFilter, type Danger } from './lib/tableActions';
   import { logQuery } from './lib/audit.svelte';
   import { confirmDiscard, resetEdits } from './lib/edits.svelte';
   import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, type Tab } from './lib/tabs.svelte';
@@ -49,8 +54,14 @@
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         e.stopPropagation();
-        if (connDialog || connDelete || danger || guardTarget || txPrompt.ask) return;
+        if (connDialog || connDelete || danger || guardTarget || txPrompt.ask || saveAsk) return;
         paletteOpen = !paletteOpen;
+      } else if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 's') {
+        // ⌘S saves, ⇧⌘S saves as a new query. preventDefault also stops the WebView's "Save page".
+        e.preventDefault();
+        e.stopPropagation();
+        if (connDialog || connDelete || danger || guardTarget || txPrompt.ask || saveAsk || paletteOpen) return;
+        saveQuery(e.shiftKey);
       }
     };
     window.addEventListener('keydown', onkey, true);
@@ -157,27 +168,49 @@
 
   // Double-click, ⌘-click or "View data" in the tree: a table tab with the table's data and properties.
   // A tab that already shows the table comes to the front instead of a second one.
-  async function openTableView(c: Conn, t: TableRef) {
+  // `filters`: replace the tab's filters and load again, also when the tab already exists (foreign key links).
+  async function openTableView(c: Conn, t: TableRef, filters?: TableFilter[]) {
     if (!confirmDiscard()) return;
     const { tab: nt, created } = openTableTab(c, t);
+    if (filters) {
+      nt.filters = filters;
+      nt.view = 'data';
+    }
     ui.page = 'query';
     await tick();
     (tabStrip?.querySelector('[aria-current=page]') ?? tabStrip?.lastElementChild)?.scrollIntoView({ inline: 'nearest' });
-    if (created) loadTableData(nt);
+    if (created || filters) loadTableData(nt);
   }
 
-  /** Runs the table tab's SELECT; also the Refresh button of its Data view. */
+  // Foreign keys of each opened table, keyed like `Tab.opened.key`; the Data view links their cells to the referenced row.
+  let tableFks = $state<Record<string, ForeignKeyInfo[]>>({});
+  const tableId = (c: Conn, t: TableRef) => `${c.id}/${t.database}/${t.schema ?? ''}/${t.name}`;
+
+  /** `force`: load again after a structure change. A failed load leaves the table without links. */
+  function loadForeignKeys(c: Conn, t: TableRef, force = false) {
+    const key = tableId(c, t);
+    if (key in tableFks && !force) return;
+    tableFks[key] ??= [];
+    api.tableProperties(c.id, t.database, t.schema, t.name).then((p) => (tableFks[key] = p.foreignKeys)).catch(() => {});
+  }
+
+  /** Opens the referenced table, filtered to the row that `row` points at. */
+  function followForeignKey(c: Conn, from: TableRef, fk: ForeignKeyInfo, row: Row) {
+    const values = fk.columns.map((col) => row[col]);
+    if (values.some((v) => v === null || typeof v === 'object')) return;
+    const ref: TableRef = { database: from.database, schema: fk.refSchema ?? null, name: fk.refTable, kind: 'table' };
+    openTableView(c, ref, fk.refColumns.map((column, i) => ({ id: crypto.randomUUID(), column, operator: '=', value: String(values[i]) })));
+  }
+
+  /** Runs the table tab's filtered SELECT; also the Refresh button of its Data view. */
   function loadTableData(t: Tab) {
     const ref = t.table!;
     const c = db.connections.find((x) => x.id === t.connId)!;
-    if (isMock) {
-      t.query = `SELECT *\nFROM ${c.engine === 'pg' ? nsOf(c.engine, ref.name) + '.' : ''}${ref.name}`;
-    } else {
-      // No LIMIT: the run limit pages the rows, so "Load more" can fetch further.
-      t.query = `SELECT *\nFROM ${qualified(c.engine, ref)}`;
-      t.opened = { key: `${c.id}/${ref.database}/${ref.schema ?? ''}/${ref.name}`, sql: t.query };
-    }
-    run(undefined, { sql: t.query });
+    // No LIMIT: the run limit pages the rows, so "Load more" can fetch further.
+    t.query = tableDataSql(c.engine, ref, t.filters, t.result?.columns ?? [], t.result?.types ?? []);
+    t.opened = { key: tableId(c, ref), sql: t.query };
+    loadForeignKeys(c, ref);
+    run(undefined, { sql: t.query, sort: t.sort });
   }
 
   // The tabs stay in the title bar on every page; picking one goes back to the query view.
@@ -200,6 +233,7 @@
 
   // Pending edits belong to the active tab's result; other tabs can close without asking.
   async function dropTab(t: Tab) {
+    if (isDirty(t) && !confirm(`“${t.title}” has unsaved changes. Close the tab without saving them?`)) return;
     if (t.id === tab.id && !confirmDiscard()) return;
     if (!(await settlePending([t], 'Closing this tab')) || !tabs.list.some((x) => x.id === t.id)) return;
     const r = running[t.id];
@@ -213,14 +247,17 @@
   function rename(t: Tab, title: string) {
     if (renaming !== t.id) return;
     renaming = null;
-    if (title.trim()) t.title = title.trim();
+    if (!title.trim()) return;
+    // A linked tab renames its saved query (and every other tab on it).
+    if (t.savedId && findSaved(t.savedId)) renameSaved(t.savedId, title);
+    else t.title = title.trim();
   }
   const focusSelect = (el: HTMLInputElement) => el.select();
 
   const conn = $derived(active());
   // `||`: a tab opened before the connections loaded has no database yet.
   const database = $derived(conn.engine === 'sqlite' ? 'main' : tab.database || conn.database);
-  let snapshot = $state<{ key: string; schema: Schema } | null>(null);
+  let snapshot = $state<{ key: string; schema: Schema; tables: SnapshotTable[] } | null>(null);
   const schema = $derived(isMock ? schemas[conn.schema] : snapshot?.key === `${conn.id}/${database}` ? snapshot.schema : {});
   const tables = $derived(Object.keys(schema));
   // Tree highlight follows the shown result; joins, unions, CTEs and aggregates have no single table.
@@ -240,7 +277,7 @@
     const engine = conn.engine;
     if (untrack(() => snapshot?.key) === key) return;
     api.schemaSnapshot(conn.id, database).then(
-      (s) => { if (`${active().id}/${database}` === key) snapshot = { key, schema: snapshotSchema(s, engine) }; },
+      (s) => { if (`${active().id}/${database}` === key) snapshot = { key, schema: snapshotSchema(s, engine), tables: s.tables }; },
       () => {},
     );
   });
@@ -273,11 +310,13 @@
    * Runs the selection, or the whole editor. `again` re-runs the shown result with a higher limit.
    * `pick` runs the given SQL instead; with `script` (a file name) the toolbar shows statement progress.
    */
-  async function run(again?: { sql: string; limit: number }, pick?: { sql: string; script?: string }) {
+  async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql: string; script?: string; sort?: ResultSort }) {
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
     if (running[t.id] || (!again && !confirmDiscard())) return;
     const sql = again?.sql ?? pick?.sql ?? (editor?.selection().trim() || t.query);
+    const sort = again?.sort ?? pick?.sort;
+    if (!again) t.sort = pick?.sort;
     const k = statementKind(sql);
     if (k === 'empty') return;
     const c = conn;
@@ -301,7 +340,7 @@
       : undefined;
     let r: QueryResult;
     try {
-      r = toResult(await api.runQuery({ connId: c.id, database: dbName, sql, queryId: id, limit, tabId: t.id }), isMock, limit, dbName);
+      r = toResult(await api.runQuery({ connId: c.id, database: dbName, sql, queryId: id, limit, tabId: t.id, sort }), isMock, limit, dbName);
     } catch (e) {
       const err = ApiError.from(e);
       r = { columns: [], rows: [], ms: Date.now() - started, error: err.code === 'cancelled' ? 'Query cancelled' : err.message, live: !isMock };
@@ -334,8 +373,8 @@
     e.preventDefault();
     e.stopPropagation();
     editor?.pointAt(e.clientX, e.clientY);
-    // Menu is w-56 (224px) and about 240px tall; keep it inside the window.
-    editorMenu = { x: Math.max(4, Math.min(e.clientX, innerWidth - 228)), y: Math.max(4, Math.min(e.clientY, innerHeight - 244)), sel: !!editor?.selection() };
+    // Menu is w-56 (224px) and about 310px tall; keep it inside the window.
+    editorMenu = { x: Math.max(4, Math.min(e.clientX, innerWidth - 228)), y: Math.max(4, Math.min(e.clientY, innerHeight - 314)), sel: !!editor?.selection() };
   }
 
   // The action runs first: the menu's `{@const}` reads `editorMenu`, which is null once closed.
@@ -444,7 +483,19 @@
 
   function loadMore() {
     const r = tab.result;
-    if (r?.sql && r.limit && r.isRead && !r.summary) run({ sql: r.sql, limit: r.limit * 2 });
+    if (r?.sql && r.limit && r.isRead && !r.summary) run({ sql: r.sql, limit: r.limit * 2, sort: tab.sort });
+  }
+
+  function sortResult(t: Tab, sort: ResultSort) {
+    const r = t.result;
+    if (!r?.sql || !r.isRead || r.summary || running[t.id] || !confirmDiscard()) return;
+    t.sort = sort;
+    run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort });
+  }
+
+  function refreshResult(t: Tab) {
+    const r = t.result;
+    if (r?.sql) run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort: t.sort });
   }
   function newConnection() {
     connEdit = null;
@@ -505,38 +556,105 @@
     tab.opened = null;
   }
 
-  /** `t`: a table name (`schema.table` on PG outside public, as the palette lists it). */
-  function openTable(t: string, at?: { database: string; schema: string | null }) {
+  /** Mock mode: runs the table in the active tab. `t`: a table name as the palette lists it. */
+  function openTable(t: string) {
     if (!confirmDiscard()) return;
-    if (isMock) {
-      tab.query = `SELECT *\nFROM ${conn.engine === 'pg' ? nsOf(conn.engine, t) + '.' : ''}${t}\nLIMIT 200;`;
-      return run();
-    }
-    let schemaName = at?.schema ?? null;
-    let table = t;
-    if (!at && conn.engine === 'pg') {
-      const dot = t.indexOf('.');
-      [schemaName, table] = dot > 0 ? [t.slice(0, dot), t.slice(dot + 1)] : ['public', t];
-    }
-    if (at && conn.engine !== 'sqlite') tab.database = at.database;
-    const dbName = at?.database ?? database;
-    // The run limit pages the rows, so the SQL has no LIMIT and "Load more" can fetch further.
-    const from = schemaName ? `${quoteIdent(conn.engine, schemaName)}.${quoteIdent(conn.engine, table)}` : quoteIdent(conn.engine, table);
-    tab.query = `SELECT *\nFROM ${from};`;
-    tab.opened = { key: `${conn.id}/${dbName}/${schemaName ?? ''}/${table}`, sql: tab.query.replace(/;\s*$/, '') };
+    tab.query = `SELECT *\nFROM ${conn.engine === 'pg' ? nsOf(conn.engine, t) + '.' : ''}${t}\nLIMIT 200;`;
     run();
+  }
+
+  /** A palette table: real connections open it in its own table tab, like the tree does. */
+  function openPaletteTable(t: string) {
+    ui.page = 'query';
+    if (isMock) return openTable(t);
+    const found = snapshot?.key === `${conn.id}/${database}` ? snapshot.tables.find((x) => snapshotKey(x, conn.engine) === t) : undefined;
+    if (found) openTableView(conn, { database, schema: found.schema ?? null, name: found.name, kind: found.kind });
   }
 
   // ---- table menu of the connection tree ----
   let tree = $state<ReturnType<typeof ConnectionTree>>();
+
+  // Palette tables: the whole active database (its snapshot), plus every table list the tree has loaded in other databases.
+  const paletteTables = $derived.by<PaletteTable[]>(() => {
+    const here = `${conn.name} / ${database}`;
+    const out: PaletteTable[] = tables.map((t) => ({ key: `${conn.id}/${database}/${t}`, label: t, hint: here, open: () => openPaletteTable(t) }));
+    if (isMock) return out;
+    for (const { c, t } of tree?.loadedTables() ?? []) {
+      if (c.id === conn.id && t.database === database) continue;
+      const open = () => { ui.page = 'query'; openTableView(c, t); };
+      // Same naming as the snapshot tables: `public` stays implicit.
+      const label = t.schema && t.schema !== 'public' ? displayName(t) : t.name;
+      out.push({ key: `${c.id}/${t.database}/${t.schema ?? ''}/${t.name}`, label, hint: `${c.name} / ${t.database}`, open });
+    }
+    return out;
+  });
+
   let danger = $state<Danger | null>(null);
-  // Outcome of a table action that has no other place to show it (count, export, an error).
-  let notice = $state<{ ok: boolean; text: string } | null>(null);
+  // Outcome of an action that has no other place to show it (count, export, a save, an error). `action`: e.g. Undo.
+  let notice = $state<{ ok: boolean; text: string; action?: { label: string; run: () => void } } | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  function notify(ok: boolean, text: string) {
-    notice = { ok, text };
+  function notify(ok: boolean, text: string, action?: { label: string; run: () => void }) {
+    notice = { ok, text, action };
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = null), ok ? 5000 : 10000);
+    noticeTimer = setTimeout(() => (notice = null), ok ? (action ? 8000 : 5000) : 10000);
+  }
+
+  // ---- saved queries ----
+  let saveAsk = $state<SaveAsk | null>(null);
+  const savedQ = $derived(findSaved(tab.savedId));
+  const tabClean = $derived(!!savedQ && !isDirty(tab));
+
+  /** ⌘S: a linked tab writes to its query at once; any other tab asks for a name. `copy` (⇧⌘S) always asks and saves a new query. */
+  function saveQuery(copy = false) {
+    const t = tab;
+    if (ui.page !== 'query' || t.table || !db.connections.length) return;
+    const q = findSaved(t.savedId);
+    if (q && !copy) return updateSaved(t);
+    if (!t.query.trim()) return;
+    const name = q ? `${q.name} copy` : /^Query \d+$/.test(t.title) ? suggestName(t.query) : t.title;
+    saveAsk = { tab: t, name, copy: !!q };
+  }
+
+  function confirmSave(a: SaveAsk, name: string) {
+    saveAsk = null;
+    createSaved(a.tab, name);
+    notify(true, `Saved “${name}”`, ui.sidebarOpen && ui.sidebarView === 'queries' ? undefined : { label: 'Show', run: () => { ui.sidebarOpen = true; ui.sidebarView = 'queries'; } });
+    focusEditor();
+  }
+
+  /** Selects the tab that already edits `q`, or opens it on its connection and database (an empty tab there is reused). */
+  async function openSaved(q: SavedQuery, andRun = false) {
+    let t = tabs.list.find((x) => x.savedId === q.id);
+    if (t) {
+      if (t.id !== tab.id && !confirmDiscard()) return;
+      selectTab(t.id);
+    } else {
+      if (!confirmDiscard()) return;
+      // A deleted connection: the query opens on the current one.
+      const own = db.connections.find((x) => x.id === q.connId);
+      const c = own ?? conn;
+      const dbName = own && q.database ? q.database : defaultDb(c);
+      const cur = tab;
+      const blank = !cur.table && !cur.savedId && !cur.query.trim() && !cur.result && !running[cur.id] && cur.connId === c.id && cur.database === dbName;
+      t = blank ? cur : newTab();
+      if (!blank) {
+        setTabConn(t, c);
+        t.database = dbName;
+        t.resultConn = c;
+      }
+      t.query = q.sql;
+      t.title = q.name;
+      t.savedId = q.id;
+    }
+    ui.page = 'query';
+    await tick();
+    tabStrip?.querySelector('[aria-current=page]')?.scrollIntoView({ inline: 'nearest' });
+    if (andRun) run(undefined, { sql: t.query });
+    else editor?.focus();
+  }
+
+  function deleteQuery(q: SavedQuery) {
+    notify(true, `Deleted “${q.name}”`, { label: 'Undo', run: deleteSaved(q.id) });
   }
 
   /** Generated SQL opens in a new tab on the table's connection and database; nothing runs. */
@@ -546,6 +664,25 @@
     setTabConn(nt, c);
     if (c.engine !== 'sqlite') nt.database = t.database;
     ui.page = 'query';
+  }
+
+  /** Chat SQL opens on the database its step ran on; older steps without one use the active tab's database. */
+  function chatTab(sql: string, src?: ChatSource) {
+    const nt = newTab(sql);
+    const c = src && connOf(src);
+    if (src && c) {
+      setTabConn(nt, c);
+      nt.resultConn = c;
+      if (c.engine !== 'sqlite') nt.database = dbOf(src, c);
+    }
+    return nt;
+  }
+
+  /** Into the active editor when it is on the step's database, else into a new tab there. */
+  function chatInsert(sql: string, src?: ChatSource) {
+    const same = !src || !connOf(src) || (tab.connId === src.connId && tab.database === dbOf(src));
+    if (!tab.table && same) tab.query = sql;
+    else chatTab(sql, src);
   }
 
   async function tableAction(a: TableAction, c: Conn, t: TableRef) {
@@ -611,7 +748,8 @@
   <!-- Title bar. data-tauri-drag-region acts on the element itself only, so the empty strips drag the window and the buttons stay clickable. -->
   <div class="flex h-10 shrink-0 items-center px-2 select-none" data-tauri-drag-region>
     <div class="flex h-full shrink-0 items-center gap-2 {inset ? 'pl-[76px]' : 'pl-2.5'}" style:width={ui.sidebarOpen ? `${ui.sidebarWidth}px` : undefined} data-tauri-drag-region>
-      <Database size={14} strokeWidth={2.25} class="shrink-0 text-accent" />
+      <!-- The app icon's spark: a horizontal bar and two bars at ±60°. -->
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" class="shrink-0 text-accent" aria-hidden="true"><path d="M5 12h14M8.5 5.938l7 12.124M15.5 5.938l-7 12.124" /></svg>
       <span class="text-[13px] font-semibold tracking-[-0.01em]" data-tauri-drag-region>sandb</span>
       <button class="btn btn-ghost ml-auto size-7 shrink-0 p-0" onclick={() => (ui.sidebarOpen = !ui.sidebarOpen)} title={ui.sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} aria-label="Toggle sidebar" aria-pressed={ui.sidebarOpen}><PanelLeft size={15} /></button>
     </div>
@@ -620,10 +758,11 @@
       <div bind:this={tabStrip} class="ml-1.5 flex h-full min-w-0 items-center gap-1 overflow-x-auto pl-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {#each tabs.list as t (t.id)}
           {@const on = t.id === tab.id && ui.page === 'query'}
+          {@const dirtyT = isDirty(t)}
           <div class="group flex h-7 shrink-0 items-center rounded-md text-[12.5px] {on ? 'tab-on font-medium text-ink' : 'text-muted hover:bg-hover hover:text-ink'}">
             {#if renaming === t.id}
               <span class="flex items-center gap-2 pl-2.5"><FileCode size={13} class="text-faint" />
-                <input class="w-28 bg-transparent outline-none" value={t.title} aria-label="Tab name" use:focusSelect onblur={(e) => rename(t, e.currentTarget.value)} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') renaming = null; }} />
+                <input class="w-28 bg-transparent outline-none" value={t.title} aria-label="Tab name" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" use:focusSelect onblur={(e) => rename(t, e.currentTarget.value)} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') renaming = null; }} />
               </span>
             {:else}
               <button class="flex h-full items-center gap-2 pl-2.5" aria-current={t.id === tab.id ? 'page' : undefined} onclick={() => pickTab(t.id)} ondblclick={() => (renaming = t.id)} title="Double-click to rename">
@@ -632,7 +771,10 @@
                 {#if t.status?.pending}<span class="size-1.5 rounded-full bg-amber-500" title="Transaction open"></span>{/if}
               </button>
             {/if}
-            <button class="mr-1 ml-1.5 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink {on ? '' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}" title="Close tab" aria-label="Close {t.title}" onclick={() => dropTab(t)}><X size={12} /></button>
+            <!-- Unsaved changes to a saved query: a dot, as in code editors; it turns into the X on hover. -->
+            <button class="mr-1 ml-1.5 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink {on || dirtyT ? '' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'}" title={dirtyT ? 'Unsaved changes · close tab' : 'Close tab'} aria-label="Close {t.title}{dirtyT ? ' (unsaved changes)' : ''}" onclick={() => dropTab(t)}>
+              {#if dirtyT}<span class="size-2 rounded-full bg-accent group-hover:hidden"></span><X size={12} class="hidden group-hover:block" />{:else}<X size={12} />{/if}
+            </button>
           </div>
         {/each}
       </div>
@@ -656,8 +798,17 @@
       </button>
     </div>
 
-    <nav class="-mx-1 flex-1 overflow-auto px-1 pb-2">
+    <div class="seg mb-1.5 flex w-full" role="tablist" aria-label="Sidebar">
+      <button class="seg-item flex-1 px-1.5 {ui.sidebarView === 'connections' ? 'seg-on' : ''}" role="tab" aria-selected={ui.sidebarView === 'connections'} onclick={() => (ui.sidebarView = 'connections')}>Connections</button>
+      <button class="seg-item flex flex-1 items-center justify-center gap-1.5 px-1.5 {ui.sidebarView === 'queries' ? 'seg-on' : ''}" role="tab" aria-selected={ui.sidebarView === 'queries'} onclick={() => (ui.sidebarView = 'queries')}>Queries {#if saved.list.length}<span class="text-[11px] font-normal text-faint tabular-nums">{saved.list.length}</span>{/if}</button>
+    </div>
+
+    <!-- Both stay mounted: the tree keeps its expanded nodes, the list its filter. -->
+    <nav class="-mx-1 flex-1 overflow-auto px-1 pb-2" hidden={ui.sidebarView !== 'connections'}>
       <ConnectionTree bind:this={tree} {selected} onopen={openTableView} onnew={newConnection} onedit={editConnection} onduplicate={duplicateConnection} ondelete={(c) => (connDelete = c)} ontable={tableAction} />
+    </nav>
+    <nav class="-mx-1 flex-1 overflow-auto px-1 pb-2" hidden={ui.sidebarView !== 'queries'} aria-label="Saved queries">
+      <SavedQueries activeId={ui.page === 'query' ? (savedQ?.id ?? null) : null} onopen={(q) => openSaved(q)} onrun={(q) => openSaved(q, true)} ondelete={deleteQuery} />
     </nav>
 
     <div class="flex items-center gap-0.5 pt-1">
@@ -692,7 +843,7 @@
     {:else if tab.table}
     {@const t = tab.table}
     <div class="flex h-11 shrink-0 items-center gap-2 px-3">
-      {#if t.kind === 'view'}<Eye size={14} class="shrink-0 text-accent" />{:else}<Table2 size={14} class="shrink-0 text-accent" />{/if}
+      {#if t.kind === 'view'}<Eye size={14} class="shrink-0 text-accent" />{:else if t.kind === 'matview'}<ScanEye size={14} class="shrink-0 text-accent" />{:else}<Table2 size={14} class="shrink-0 text-accent" />{/if}
       <span class="min-w-0 truncate text-[13px] font-semibold" title={displayName(t)}>{displayName(t)}</span>
       <span class="hidden min-w-0 truncate text-[12px] text-faint md:inline">{conn.name} / {database}</span>
       <div class="seg ml-2 shrink-0" role="tablist" aria-label="Table view">
@@ -710,12 +861,17 @@
       {/if}
     </div>
     {#if tab.view === 'data'}
-      <div class="relative min-h-0 flex-1 border-t border-line">
-        <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+      {@const tableKey = conn.engine === 'pg' && t.schema && t.schema !== 'public' ? `${t.schema}.${t.name}` : t.name}
+      {@const columns = tab.result?.columns.length ? tab.result.columns : (schema[tableKey] ?? [])}
+      <div class="flex min-h-0 flex-1 flex-col border-t border-line">
+        <TableFilterBar {columns} types={tab.result?.types ?? []} bind:filters={tab.filters} loading={!!busy} onapply={() => loadTableData(tab)} />
+        <div class="relative min-h-0 flex-1">
+          <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} sort={tab.sort ?? null} onsort={(s) => sortResult(tab, s)} onloadmore={loadMore} onsaved={() => refreshResult(tab)} foreignKeys={tableFks[tab.opened?.key ?? '']} onfollow={(fk, row) => followForeignKey(conn, t, fk, row)} />
+        </div>
       </div>
     {:else}
       <div class="flex min-h-0 flex-1 border-t border-line">
-        {#key tab.id}<TableProperties {conn} table={t} />{/key}
+        {#key tab.id}<TableProperties {conn} table={t} onchanged={() => { loadForeignKeys(conn, t, true); tree?.refreshTables(conn, t); }} onopen={(r) => openTableView(conn, r)} />{/key}
       </div>
     {/if}
     {:else}
@@ -742,6 +898,11 @@
       {:else if kind === 'write'}
         <span class="shrink-0 px-1 text-[12px] font-medium text-amber-700 dark:text-amber-400">Write</span>
       {/if}
+      <!-- A saved, unchanged tab shows "Saved"; ⌘S then has nothing to write. -->
+      <button class="btn btn-ghost shrink-0 px-2 xl:px-2.5" onclick={() => saveQuery()} disabled={!savedQ && kind === 'empty'} title={savedQ ? (tabClean ? `“${savedQ.name}” is saved · ⇧⌘S saves a copy` : `Save changes to “${savedQ.name}” (⌘S)`) : 'Save query (⌘S)'} aria-label={tabClean ? 'Saved' : 'Save query'}>
+        {#if tabClean}<Check size={14} class="text-emerald-600 dark:text-emerald-400" />{:else}<Save size={14} />{/if}
+        <span class="hidden xl:inline">{tabClean ? 'Saved' : 'Save'}</span>
+      </button>
       <!-- With the chat already open this only repeats it, so narrow toolbars drop it. -->
       <button class="btn btn-ghost shrink-0 px-2 2xl:px-2.5 {ui.chatOpen ? 'hidden lg:inline-flex' : ''}" onclick={() => (ui.chatOpen = true)} title="Explain with AI"><Sparkles size={14} /> <span class="hidden 2xl:inline">Explain with AI</span></button>
       {#if busy}
@@ -794,7 +955,7 @@
           </div>
         </div>
         <div class="relative min-h-0 flex-1">
-          <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} onloadmore={loadMore} onsaved={() => tab.result?.sql && (tab.result = runMock(tab.result.sql, schema, conn))} />
+          <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} sort={tab.sort ?? null} onsort={(s) => sortResult(tab, s)} onloadmore={loadMore} onsaved={() => refreshResult(tab)} />
         </div>
       </div>
     </div>
@@ -812,7 +973,7 @@
     <!-- Below 880 px the panel floats over the main card, so it has no gap to drag. -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div class="-mx-2 hidden w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40 min-[880px]:block" role="separator" aria-orientation="vertical" aria-label="Resize assistant" aria-valuenow={ui.chatWidth} aria-valuemin={280} aria-valuemax={640} tabindex="0" onpointerdown={resizeChat} onkeydown={keyChat}></div>
-    <ChatPanel onEnableWrites={() => (guardTarget = conn)} onInsertSql={(s) => (tab.table ? newTab(s) : (tab.query = s))} />
+    <ChatPanel {tables} onEnableWrites={(c) => (guardTarget = c)} onInsertSql={chatInsert} onRunSql={(s, src) => { chatTab(s, src); run(undefined, { sql: s }); }} />
   {/if}
   </div>
 </div>
@@ -824,6 +985,9 @@
     <button class="nav-item" role="menuitem" disabled={!!busy || kind === 'empty'} onclick={() => menuAct(() => run(undefined, { sql: tab.query }))}><ListOrdered size={13} /> Run all statements</button>
     <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => scriptInput?.click())}><FileUp size={13} /> Run SQL script from file…</button>
     <div class="mx-2 my-1 h-px bg-line"></div>
+    <button class="nav-item" role="menuitem" disabled={!savedQ && kind === 'empty'} onclick={() => menuAct(() => saveQuery())}><Save size={13} /> <span class="flex-1">{savedQ ? 'Save changes' : 'Save query…'}</span><kbd class="kbd">⌘S</kbd></button>
+    <button class="nav-item" role="menuitem" disabled={kind === 'empty'} onclick={() => menuAct(() => saveQuery(true))}><CopyPlus size={13} /> <span class="flex-1">Save as new query…</span><kbd class="kbd">⇧⌘S</kbd></button>
+    <div class="mx-2 my-1 h-px bg-line"></div>
     <button class="nav-item" role="menuitem" disabled={!m.sel} onclick={() => menuAct(() => copySelection(true))}><Scissors size={13} /> Cut</button>
     <button class="nav-item" role="menuitem" disabled={!m.sel} onclick={() => menuAct(() => copySelection(false))}><Copy size={13} /> Copy</button>
     <button class="nav-item" role="menuitem" onclick={() => menuAct(() => navigator.clipboard?.readText().then((s) => editor?.insert(s), () => {}))}><ClipboardPaste size={13} /> Paste</button>
@@ -834,16 +998,22 @@
 <ConnectionDialog bind:open={connDialog} conn={connEdit} canswitch={canSwitch} canupdate={canUpdate} onsaved={openFirstTable} onedited={connEdited} />
 <DeleteConnectionDialog bind:target={connDelete} ondelete={deleteConnection} />
 <TableDangerDialog bind:target={danger} onconfirm={runDanger} />
+<SaveQueryDialog bind:ask={saveAsk} onsave={confirmSave} />
 {#if notice}
   {@const n = notice}
   <div class="popover fixed bottom-3 left-3 z-50 flex max-w-md items-start gap-2 px-3 py-2 text-[12.5px] {n.ok ? 'text-ink' : 'text-red-700 dark:text-red-300'}" role={n.ok ? 'status' : 'alert'}>
     <span class="min-w-0 flex-1 break-words">{n.text}</span>
+    {#if n.action}
+      {@const a = n.action}
+      <!-- Run first: `a` reads `notice`, which is null once cleared. -->
+      <button class="-my-0.5 h-6 shrink-0 rounded px-1.5 text-[12.5px] font-medium text-accent hover:bg-hover" onclick={() => { a.run(); notice = null; }}>{a.label}</button>
+    {/if}
     <button class="grid size-5 shrink-0 place-items-center rounded text-faint hover:bg-hover hover:text-ink" aria-label="Dismiss" onclick={() => (notice = null)}><X size={12} /></button>
   </div>
 {/if}
 <CommandPalette
   bind:open={paletteOpen}
-  {tables}
+  tables={paletteTables}
   onfocuseditor={focusEditor}
   onrun={() => { if (kind === 'empty') return; ui.page = 'query'; run(); }}
   ontogglechat={() => (ui.chatOpen = !ui.chatOpen)}
@@ -851,8 +1021,9 @@
   onpage={(p) => (ui.page = p)}
   ontoggletheme={toggleTheme}
   onnewconnection={newConnection}
-  onopentable={(t) => { ui.page = 'query'; openTable(t); }}
   onswitch={(c) => { ui.page = 'query'; switchConn(c); }}
+  onsave={() => saveQuery()}
+  onopensaved={(q) => openSaved(q)}
 />
 <!-- Last, so it stacks above the connection and delete dialogs that wait on it. -->
 <PendingTxDialog />

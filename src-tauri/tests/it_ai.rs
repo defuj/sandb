@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use sandb_lib::core::ai::session::{self, ChatEvent, ChatRequest, ChatRole, ChatTurn};
+use sandb_lib::core::ai::session::{self, ChatEvent, ChatRequest, ChatRole, ChatSource, ChatTurn};
 use sandb_lib::core::ai::settings::{self, AiSettings, Privacy};
 use sandb_lib::core::ai::tools;
 use sandb_lib::core::connections::{self, Connection, ConnectionInput, Engine, Env, SslMode};
@@ -87,15 +87,17 @@ fn setup(privacy: Privacy, read_only: bool) -> Ctx {
 fn request(ctx: &Ctx, chat_id: &str, message: &str, allow_writes: bool) -> ChatRequest {
     ChatRequest {
         chat_id: chat_id.into(),
-        conn_id: ctx.conn.id.clone(),
-        database: None,
-        schema: None,
+        sources: vec![ChatSource {
+            conn_id: ctx.conn.id.clone(),
+            database: None,
+            schema: None,
+            allow_writes,
+        }],
         history: vec![ChatTurn {
             role: ChatRole::Assistant,
             content: "Hello, how can I help?".into(),
         }],
         message: message.into(),
-        allow_writes,
     }
 }
 
@@ -249,6 +251,47 @@ async fn bypass_is_refused_by_the_guard() {
     }
     // The model got the refusal, not a success.
     assert!(text(&events).contains("guard_rejected"), "{events:#?}");
+}
+
+#[tokio::test]
+async fn chart_scenario_sends_rows_to_the_ui_only() {
+    let ctx = setup(Privacy::Schema, false);
+    let events = chat(&ctx, "chart the orders", false).await;
+    assert_terminal(&events);
+    assert_eq!(events.last(), Some(&ChatEvent::Done));
+    let (name, _, result) = tool(&events);
+    assert_eq!(name, "render_chart");
+    match result {
+        ChatEvent::ToolResult { ok, summary, .. } => {
+            assert!(ok, "{result:?}");
+            assert!(summary.starts_with("Bar chart · "), "{summary}");
+        }
+        _ => unreachable!(),
+    }
+    // The chart comes before its result, so the UI can draw it in place.
+    let at = |f: fn(&ChatEvent) -> bool| events.iter().position(f).unwrap();
+    assert!(
+        at(|e| matches!(e, ChatEvent::Chart { .. }))
+            < at(|e| matches!(e, ChatEvent::ToolResult { .. }))
+    );
+    let Some(ChatEvent::Chart {
+        spec,
+        columns,
+        rows,
+        truncated,
+        ..
+    }) = events.iter().find(|e| matches!(e, ChatEvent::Chart { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(spec.x, "status");
+    assert_eq!(columns, &["status", "orders"]);
+    assert!(!rows.is_empty() && !truncated);
+    // `schema` privacy: the user sees the values, the model only names and counts.
+    let status = rows[0][0].as_str().unwrap();
+    let t = text(&events);
+    assert!(t.contains("\"rowCount\""), "{t}");
+    assert!(!t.contains(status), "{t}");
 }
 
 async fn order_1_status(ctx: &Ctx) -> Value {
@@ -536,13 +579,17 @@ async fn schema_privacy_hides_query_error_text() {
             .unwrap()
             .to_string();
         let ai = ai_settings(privacy);
+        let sources = [tools::Source {
+            id: "db1".into(),
+            conn: ctx.conn.clone(),
+            database: "shop".into(),
+            schema: None,
+            allow_writes: false,
+        }];
         let tc = tools::ToolContext {
             state: &ctx.st,
-            conn: &ctx.conn,
-            database: "shop",
-            schema: None,
+            sources: &sources,
             settings: &ai,
-            allow_writes: false,
         };
         let out = tools::execute(&tc, "call_cast", "run_read_query", &args).await;
         match &out.events[..] {

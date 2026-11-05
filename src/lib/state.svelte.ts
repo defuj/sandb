@@ -45,27 +45,27 @@ export const ui = $state({
   sidebarWidth: 224,
   /** False hides the sidebar; the main card then starts at the window edge. */
   sidebarOpen: true,
+  /** What the sidebar lists: the connection tree or the saved queries. */
+  sidebarView: 'connections' as 'connections' | 'queries',
   /** Editor height as a fraction of the main card; the results grid takes the rest. */
   editorSplit: 0.34,
   /** False hides the results grid; the editor then fills the card. */
   resultsOpen: true,
 });
 
-export type Provider = 'ollama' | 'lmstudio' | 'openrouter' | 'openai' | 'custom';
+/** The wire format of the AI server. Any other saved label loads as `openai`. */
+export type Provider = 'openai' | 'anthropic';
 
-export const providers: Record<Provider, { label: string; url: string; model: string; needsKey: boolean }> = {
-  ollama: { label: 'Ollama', url: 'http://localhost:11434/v1', model: 'llama3.1:8b', needsKey: false },
-  lmstudio: { label: 'LM Studio', url: 'http://localhost:1234/v1', model: 'qwen2.5-coder-7b', needsKey: false },
-  openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', needsKey: true },
-  openai: { label: 'OpenAI', url: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', needsKey: true },
-  custom: { label: 'Custom', url: '', model: '', needsKey: true },
+export const providers: Record<Provider, { label: string; url: string; model: string }> = {
+  openai: { label: 'OpenAI-compatible', url: 'https://api.openai.com/v1', model: 'gpt-4.1-mini' },
+  anthropic: { label: 'Anthropic-compatible', url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-5' },
 };
 
 export const ai = $state({
-  provider: 'ollama' as Provider,
-  baseUrl: providers.ollama.url,
+  provider: 'openai' as Provider,
+  baseUrl: 'http://localhost:11434/v1',
   apiKey: '',
-  model: providers.ollama.model,
+  model: 'llama3.1:8b',
   /** 'results' = schema + query results go to the model; 'schema' = schema only. */
   privacy: 'results' as 'results' | 'schema',
   maxRows: 500,
@@ -104,7 +104,7 @@ export async function loadAiSettings() {
   if (isMock) return;
   try {
     const s = await api.getAiSettings();
-    ai.provider = s.provider in providers ? (s.provider as Provider) : 'custom';
+    ai.provider = s.provider === 'anthropic' ? 'anthropic' : 'openai';
     ai.baseUrl = s.baseUrl;
     ai.model = s.model;
     ai.privacy = s.privacy;

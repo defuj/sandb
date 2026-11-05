@@ -31,10 +31,17 @@ pub async fn schemas(p: &PgPool) -> Result<Vec<String>, AppError> {
 }
 
 pub async fn tables(p: &PgPool, schema: &str) -> Result<Vec<TableInfo>, AppError> {
-    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+    // A partition names its parent; the parent gets its schema only when it lives elsewhere.
+    let rows: Vec<(String, String, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT c.relname::text, c.relkind::text, \
-           CASE WHEN c.reltuples >= 0 THEN c.reltuples::int8 END \
+           CASE WHEN c.reltuples >= 0 THEN c.reltuples::int8 END, \
+           CASE WHEN p.oid IS NULL THEN NULL \
+             WHEN pn.nspname = n.nspname THEN p.relname::text \
+             ELSE format('%I.%I', pn.nspname, p.relname) END \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_inherits i ON c.relispartition AND i.inhrelid = c.oid \
+         LEFT JOIN pg_class p ON p.oid = i.inhparent \
+         LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'f', 'v', 'm') \
          ORDER BY c.relname",
     )
@@ -43,20 +50,25 @@ pub async fn tables(p: &PgPool, schema: &str) -> Result<Vec<TableInfo>, AppError
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(name, kind, est)| {
-            let view = kind == "v" || kind == "m";
+        .map(|(name, relkind, est, parent)| {
+            let kind = kind(&relkind);
             TableInfo {
                 name,
-                kind: if view {
-                    TableKind::View
-                } else {
-                    TableKind::Table
-                },
-                row_estimate: if view { None } else { est },
+                kind,
+                row_estimate: if kind == TableKind::View { None } else { est },
                 has_rowid: None,
+                partition_of: parent,
             }
         })
         .collect())
+}
+
+fn kind(relkind: &str) -> TableKind {
+    match relkind {
+        "v" => TableKind::View,
+        "m" => TableKind::Matview,
+        _ => TableKind::Table,
+    }
 }
 
 /// name, formatted type, NOT NULL, default expression, position in the primary key.
@@ -272,14 +284,10 @@ pub async fn snapshot_tables(p: &PgPool) -> Result<Vec<SnapTable>, AppError> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(&sql).fetch_all(p).await?;
     Ok(rows
         .into_iter()
-        .map(|(schema, table, kind)| SnapTable {
+        .map(|(schema, table, relkind)| SnapTable {
             schema: Some(schema),
             table,
-            kind: if kind == "v" || kind == "m" {
-                TableKind::View
-            } else {
-                TableKind::Table
-            },
+            kind: kind(&relkind),
         })
         .collect())
 }

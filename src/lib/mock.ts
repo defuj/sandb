@@ -1,5 +1,7 @@
-/** `object`: JSON values and `{ $bytes, len }` from a real database. */
-export type Cell = string | number | boolean | null | object;
+import type { CellValue, EditableResult, ResultSort } from './api';
+import { filterRows, type TableFilter } from './tableActions';
+
+export type Cell = CellValue;
 export type Row = Record<string, Cell>;
 export interface QueryResult {
   columns: string[];
@@ -10,6 +12,9 @@ export interface QueryResult {
   /** Source table and SQL of a SELECT result; edit mode uses them. */
   table?: string;
   sql?: string;
+  /** Live edit metadata, loaded on the first edit attempt. */
+  edit?: EditableResult;
+  editReason?: string;
   /** Set by real runs: column types, more rows exist, the row limit used, the database. */
   types?: string[];
   truncated?: boolean;
@@ -21,7 +26,7 @@ export interface QueryResult {
   isRead?: boolean;
   /** Backend notices, e.g. a rolled-back open transaction. */
   notices?: string[];
-  /** From a real database (not the mock); edit mode is mock-only for now. */
+  /** From a real database (not the in-memory mock). */
   live?: boolean;
 }
 
@@ -139,13 +144,42 @@ export function statementKind(sql: string): 'read' | 'write' | 'empty' {
   return ['select', 'with', 'show', 'explain', 'describe'].includes(first) ? 'read' : 'write';
 }
 
+/** Parses the simple WHERE grammar emitted by the table filter bar. Other editor queries keep the old mock behavior. */
+function mockFilters(sql: string): TableFilter[] | null {
+  const input = /\bwhere\s+([\s\S]*?)(?:\blimit\b|$)/i.exec(sql)?.[1].trim().replace(/;$/, '');
+  if (input === undefined) return [];
+  const condition = /\s*(\w+)\s*(IS\s+NOT\s+NULL|IS\s+NULL|>=|<=|<>|=|>|<|LIKE)\s*(?:'((?:[^']|'')*)'|(-?(?:\d+(?:\.\d*)?|\.\d+)))?\s*(AND\s+|$)/gi;
+  const filters: TableFilter[] = [];
+  let at = 0;
+  while (at < input.length) {
+    condition.lastIndex = at;
+    const m = condition.exec(input);
+    if (!m || m.index !== at) return null;
+    const operator = m[2].replace(/\s+/g, ' ').toUpperCase();
+    const value = (m[3]?.replace(/''/g, "'") ?? m[4] ?? '');
+    let op: TableFilter['operator'];
+    if (operator === 'LIKE') {
+      const leading = value.startsWith('%'), trailing = value.endsWith('%');
+      op = leading && trailing ? 'contains' : leading ? 'endsWith' : 'startsWith';
+    } else {
+      op = operator === 'IS NULL' ? 'isNull' : operator === 'IS NOT NULL' ? 'isNotNull' : operator as TableFilter['operator'];
+    }
+    filters.push({ id: String(filters.length), column: m[1], operator: op, value: operator === 'LIKE' ? value.replace(/^%|%$/g, '') : value });
+    at = condition.lastIndex;
+  }
+  return filters;
+}
+
 // Prototype only: fakes a query run against generated rows.
-export function runMock(sql: string, schema: Schema, conn: { engine: Engine; database: string }): QueryResult {
+export function runMock(sql: string, schema: Schema, conn: { engine: Engine; database: string }, options: { limit?: number; sort?: ResultSort } = {}): QueryResult {
   const ms = 8 + Math.floor(Math.random() * 40);
   if (statementKind(sql) === 'write') {
     return { columns: [], rows: [], ms, note: 'Statement ran (mock). 0 rows affected.' };
   }
-  const m = sql.match(/from\s+(?:(\w+)\.)?(\w+)/i);
+  const normalized = sql
+    .replace(/"((?:[^"]|"")*)"/g, (_, name) => name.replace(/""/g, '"'))
+    .replace(/`((?:[^`]|``)*)`/g, (_, name) => name.replace(/``/g, '`'));
+  const m = normalized.match(/from\s+(?:(\w+)\.)?(\w+)/i);
   const prefix = m?.[1]?.toLowerCase();
   const table = m?.[2]?.toLowerCase() ?? Object.keys(schema)[0];
   // MySQL also accepts the database name as the qualifier (`db.table`).
@@ -153,8 +187,26 @@ export function runMock(sql: string, schema: Schema, conn: { engine: Engine; dat
   if (!schema[table] || !okPrefix) {
     return { columns: [], rows: [], ms, error: `relation "${prefix ? prefix + '.' : ''}${table}" does not exist` };
   }
-  const limit = Number(sql.match(/limit\s+(\d+)/i)?.[1] ?? 200);
+  const sqlLimit = Number(normalized.match(/limit\s+(\d+)/i)?.[1] ?? NaN);
+  const limit = Number.isFinite(sqlLimit) ? Math.min(options.limit ?? sqlLimit, sqlLimit) : (options.limit ?? 200);
   const d = tableData(schema, table);
-  const rows = [...d.base.slice(0, limit), ...d.added].map((r) => ({ ...r }));
+  const filters = mockFilters(normalized);
+  const base = filters?.length ? filterRows(d.base, filters) : d.base;
+  const added = filters?.length ? filterRows(d.added, filters) : d.added;
+  let rows = options.sort
+    ? [...base, ...added].map((r) => ({ ...r }))
+    : [...base.slice(0, limit), ...added].map((r) => ({ ...r }));
+  if (options.sort) {
+    const { column, ascending } = options.sort;
+    rows.sort((a, b) => {
+      const x = a[column], y = b[column];
+      if (x === y) return 0;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
+      return ascending ? c : -c;
+    });
+    rows = rows.slice(0, limit);
+  }
   return { columns: schema[table], rows, ms, table, sql };
 }

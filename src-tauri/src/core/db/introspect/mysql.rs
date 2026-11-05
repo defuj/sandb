@@ -62,9 +62,10 @@ pub async fn tables(p: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, App
                 kind: k,
                 row_estimate: match k {
                     TableKind::Table => text(r, 2).and_then(|s| s.parse().ok()),
-                    TableKind::View => None,
+                    TableKind::View | TableKind::Matview => None,
                 },
                 has_rowid: None,
+                partition_of: None,
             }
         })
         .collect())

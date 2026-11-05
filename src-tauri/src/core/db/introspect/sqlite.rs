@@ -45,6 +45,7 @@ pub async fn tables(p: &SqlitePool) -> Result<Vec<TableInfo>, AppError> {
                 has_rowid: Some(
                     k == TableKind::Table && !without_rowid(sql.as_deref().unwrap_or("")),
                 ),
+                partition_of: None,
             }
         })
         .collect())

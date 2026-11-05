@@ -20,6 +20,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use sandb_lib::core::ai::session::{self as chat, ChatEvent, ChatRequest};
 use sandb_lib::core::ai::settings::{self as ai_settings, AiSettings};
 use sandb_lib::core::connections::{self, ConnectionInput, Engine};
+use sandb_lib::core::db::edit::{self, ApplyEditsRequest, CellValueRequest, EditableRequest};
 use sandb_lib::core::db::query::{self, RunRequest};
 use sandb_lib::core::db::readonly::{self, ReadLimits};
 use sandb_lib::core::db::session;
@@ -198,6 +199,21 @@ struct ConnArgs {
 #[derive(Deserialize)]
 struct RunArgs {
     request: RunRequest,
+}
+
+#[derive(Deserialize)]
+struct EditableArgs {
+    request: EditableRequest,
+}
+
+#[derive(Deserialize)]
+struct ApplyEditsArgs {
+    request: ApplyEditsRequest,
+}
+
+#[derive(Deserialize)]
+struct CellValueArgs {
+    request: CellValueRequest,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +397,27 @@ async fn dispatch(
             }
             .await,
         ),
+        "editable_result" => reply(
+            async {
+                let a: EditableArgs = args(body)?;
+                edit::editable_result(st, a.request).await
+            }
+            .await,
+        ),
+        "apply_edits" => reply(
+            async {
+                let a: ApplyEditsArgs = args(body)?;
+                edit::apply_edits(st, a.request).await
+            }
+            .await,
+        ),
+        "cell_value" => reply(
+            async {
+                let a: CellValueArgs = args(body)?;
+                edit::cell_value(st, a.request).await
+            }
+            .await,
+        ),
         "cancel_query" => reply(
             async {
                 let a: CancelArgs = args(body)?;
@@ -465,8 +502,8 @@ async fn dispatch(
             Err(e) => reply::<()>(Err(e)),
         },
         "chat_cancel" => reply(args::<ChatCancelArgs>(body).map(|a| chat::cancel(st, &a.chat_id))),
-        // No export_csv or export_table_sql: the bridge never writes files on request; the
-        // browser UI exports the loaded rows client-side instead.
+        // No export_csv, export_table_sql or save_pdf: the bridge never writes files on request;
+        // the browser UI downloads the file client-side instead.
         _ => reply::<()>(Err(AppError::not_found(format!(
             "Unknown command {command}"
         )))),

@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlparser::ast::{OrderBy, OrderByExpr, OrderByKind, OrderByOptions, OrderBySort, Statement};
+use sqlparser::parser::Parser;
 use sqlx::mysql::{MySql, MySqlConnection, MySqlRow};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgRow, PgValueFormat, Postgres};
@@ -41,6 +43,14 @@ pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RunSort {
+    pub column: String,
+    pub column_index: usize,
+    pub ascending: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     pub conn_id: String,
     /// The connection's own database when absent.
@@ -55,6 +65,9 @@ pub struct RunRequest {
     /// inside that tab's own session and open transaction (manual commit).
     #[serde(default)]
     pub tab_id: Option<String>,
+    /// Server-side ordering for one read result. The original SQL remains the result's source.
+    #[serde(default)]
+    pub sort: Option<RunSort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -443,7 +456,8 @@ struct ResultSet {
 /// connection, so a session-mode read drains like a write instead (it never sets the flag).
 async fn run_one<DB>(
     conn: &mut DB::Connection,
-    sql: &str,
+    source_sql: &str,
+    execution_sql: &str,
     read: bool,
     limit: usize,
     in_session: bool,
@@ -459,7 +473,7 @@ where
     let mut cur = ResultSet::default();
     let mut cut_off = false;
     {
-        let mut stream = sqlx::raw_sql(sql).fetch_many(&mut *conn);
+        let mut stream = sqlx::raw_sql(execution_sql).fetch_many(&mut *conn);
         while let Some(item) = stream.try_next().await? {
             match item {
                 // Every engine ends each result set or command with its own completion.
@@ -499,9 +513,9 @@ where
     // No rows came back, so no row described the columns; ask the server instead.
     let described = if let [set] = sets.as_slice()
         && set.columns.is_none()
-        && looks_like_read(sql)
+        && looks_like_read(execution_sql)
     {
-        match (&mut *conn).describe(sql).await {
+        match (&mut *conn).describe(execution_sql).await {
             Ok(d) => Some(d.columns().iter().map(meta).collect::<Vec<_>>()),
             Err(_) => None,
         }
@@ -515,7 +529,7 @@ where
             .or_else(|| described.clone())
             .unwrap_or_default();
         out.push(StatementResult {
-            sql: sql.to_string(),
+            sql: source_sql.to_string(),
             row_count: set.rows.len(),
             affected: columns.is_empty().then_some(set.changed),
             columns,
@@ -533,6 +547,7 @@ where
 async fn run_all<DB>(
     conn: &mut DB::Connection,
     stmts: &[String],
+    execution_stmts: &[String],
     reads: &[bool],
     limit: usize,
     cancelled: &AtomicBool,
@@ -553,7 +568,18 @@ where
         if cancelled.load(Ordering::SeqCst) {
             return Err(cancelled_error());
         }
-        match run_one::<DB>(&mut *conn, sql, reads[i], limit, false, cell, affected).await {
+        match run_one::<DB>(
+            &mut *conn,
+            sql,
+            &execution_stmts[i],
+            reads[i],
+            limit,
+            false,
+            cell,
+            affected,
+        )
+        .await
+        {
             Ok((r, cut_off)) => {
                 out.cut_off = cut_off;
                 out.results.extend(r);
@@ -805,6 +831,75 @@ fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
+/// Builds the execution text separately from the editor text: sorting changes only what is sent
+/// to the server, never the SQL retained in `StatementResult` for source reruns and editing.
+fn sorted_statements(
+    engine: Engine,
+    stmts: &[String],
+    reads: &[bool],
+    sort: Option<&RunSort>,
+) -> Result<Vec<String>, AppError> {
+    let Some(sort) = sort else {
+        return Ok(stmts.to_vec());
+    };
+    if stmts.len() != 1 || reads != [true] {
+        return Err(AppError::invalid(
+            "Sorting requires exactly one plain read query",
+        ));
+    }
+    if sort.column.is_empty() {
+        return Err(AppError::invalid("Sort column cannot be empty"));
+    }
+    let dialect = split::dialect(engine);
+    let mut parsed = Parser::parse_sql(&*dialect, &stmts[0]).map_err(|e| {
+        AppError::invalid("Cannot sort a query that does not parse").with_detail(e.to_string())
+    })?;
+    let [Statement::Query(query)] = parsed.as_mut_slice() else {
+        return Err(AppError::invalid("Sorting requires a SELECT query"));
+    };
+    if let sqlparser::ast::SetExpr::Select(select) = &*query.body {
+        let explicit_arity = select
+            .projection
+            .iter()
+            .try_fold(0usize, |n, item| match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(_)
+                | sqlparser::ast::SelectItem::ExprWithAlias { .. } => n.checked_add(1),
+                _ => None,
+            });
+        if let Some(n) = explicit_arity
+            && sort.column_index >= n
+        {
+            return Err(AppError::invalid(format!(
+                "Sort column index {} is outside the query's {n} output columns",
+                sort.column_index
+            )));
+        }
+    }
+    let ordinal = sort
+        .column_index
+        .checked_add(1)
+        .ok_or_else(|| AppError::invalid("Sort column index is too large"))?;
+    let expr = OrderByExpr {
+        expr: sqlparser::ast::Expr::Value(
+            sqlparser::ast::Value::Number(ordinal.to_string(), false).into(),
+        ),
+        options: OrderByOptions {
+            sort: Some(if sort.ascending {
+                OrderBySort::Asc
+            } else {
+                OrderBySort::Desc
+            }),
+            nulls_first: None,
+        },
+        with_fill: None,
+    };
+    query.order_by = Some(OrderBy {
+        kind: OrderByKind::Expressions(vec![expr]),
+        interpolate: None,
+    });
+    Ok(vec![query.to_string()])
+}
+
 /// Runs `req.sql` statement by statement on one connection, so `SET` and temp tables persist
 /// within the run (not after it). No restrictions on the SQL: this is the user's own editor.
 /// On a writable production connection with `tab_id`, the run executes inside the tab's
@@ -836,6 +931,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
         .iter()
         .map(|s| facts::is_plain_read_sql(conn.engine, s))
         .collect();
+    let execution_stmts = sorted_statements(conn.engine, &stmts, &reads, req.sort.as_ref())?;
     // Read-only connections never enter a tab session: there is nothing to commit, and the
     // frontend hides Commit / Rollback for them. Plain reads on a tab without a session need
     // none either: they take the pool like any autocommit read.
@@ -844,7 +940,17 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
         && let Some(tab_id) = req.tab_id.as_deref()
         && (state.sessions.has(tab_id) || reads.contains(&false))
     {
-        return run_in_session(state, &conn, &database, tab_id, &req, &stmts, &reads).await;
+        return run_in_session(
+            state,
+            &conn,
+            &database,
+            tab_id,
+            &req,
+            &stmts,
+            &execution_stmts,
+            &reads,
+        )
+        .await;
     }
     let lone_read = reads == [true];
     let limit = clamp_limit(req.limit);
@@ -869,6 +975,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
             let r = run_all::<Postgres>(
                 &mut c,
                 &stmts,
+                &execution_stmts,
                 &reads,
                 limit,
                 &cancelled,
@@ -894,6 +1001,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
             let r = run_all::<MySql>(
                 &mut c,
                 &stmts,
+                &execution_stmts,
                 &reads,
                 limit,
                 &cancelled,
@@ -920,6 +1028,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
             let r = run_all::<Sqlite>(
                 &mut c,
                 &stmts,
+                &execution_stmts,
                 &reads,
                 limit,
                 &cancelled,
@@ -986,6 +1095,7 @@ async fn run_in_session(
     tab_id: &str,
     req: &RunRequest,
     stmts: &[String],
+    execution_stmts: &[String],
     reads: &[bool],
 ) -> Result<QueryRun, AppError> {
     let kinds: Vec<Option<facts::StatementKind>> = stmts
@@ -1052,7 +1162,7 @@ async fn run_in_session(
                     s.dirty = true;
                 }
             }
-            match exec(&mut s.conn, sql, reads[i], limit).await {
+            match exec(&mut s.conn, sql, &execution_stmts[i], reads[i], limit).await {
                 Ok(r) => {
                     results.extend(r);
                     done.fetch_add(1, Ordering::SeqCst);
@@ -1117,25 +1227,51 @@ async fn run_in_session(
 /// sending rows and cost the open transaction the next statement or probe.
 async fn exec(
     c: &mut Conn,
-    sql: &str,
+    source_sql: &str,
+    execution_sql: &str,
     read: bool,
     limit: usize,
 ) -> Result<Vec<StatementResult>, sqlx::Error> {
     Ok(match c {
         Conn::Pg(c) => {
-            run_one::<Postgres>(c, sql, read, limit, true, pg_cell, |d| d.rows_affected())
-                .await?
-                .0
+            run_one::<Postgres>(
+                c,
+                source_sql,
+                execution_sql,
+                read,
+                limit,
+                true,
+                pg_cell,
+                |d| d.rows_affected(),
+            )
+            .await?
+            .0
         }
         Conn::MySql(c) => {
-            run_one::<MySql>(c, sql, read, limit, true, mysql_cell, |d| d.rows_affected())
-                .await?
-                .0
+            run_one::<MySql>(
+                c,
+                source_sql,
+                execution_sql,
+                read,
+                limit,
+                true,
+                mysql_cell,
+                |d| d.rows_affected(),
+            )
+            .await?
+            .0
         }
         Conn::Sqlite(c) => {
-            run_one::<Sqlite>(c, sql, read, limit, true, sqlite_cell, |d| {
-                d.rows_affected()
-            })
+            run_one::<Sqlite>(
+                c,
+                source_sql,
+                execution_sql,
+                read,
+                limit,
+                true,
+                sqlite_cell,
+                |d| d.rows_affected(),
+            )
             .await?
             .0
         }
@@ -1232,6 +1368,118 @@ mod tests {
             reg.progress("q1").is_none(),
             "the entry is removed with the run"
         );
+    }
+
+    #[test]
+    fn sort_replaces_order_by_before_limit_and_preserves_inputs() {
+        let source = vec!["SELECT id, name FROM users ORDER BY id DESC LIMIT 25".into()];
+        let sorted = sorted_statements(
+            Engine::Pg,
+            &source,
+            &[true],
+            Some(&RunSort {
+                column: "displayName".into(),
+                column_index: 1,
+                ascending: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            source[0],
+            "SELECT id, name FROM users ORDER BY id DESC LIMIT 25"
+        );
+        assert_eq!(
+            sorted[0],
+            "SELECT id, name FROM users ORDER BY 2 ASC LIMIT 25"
+        );
+    }
+
+    #[test]
+    fn sort_uses_ordinals_for_expressions_and_checks_explicit_arity() {
+        let source = vec!["SELECT lower(name) AS name, upper(name) AS name FROM users".into()];
+        let sorted = sorted_statements(
+            Engine::Pg,
+            &source,
+            &[true],
+            Some(&RunSort {
+                column: "name".into(),
+                column_index: 1,
+                ascending: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            sorted[0],
+            "SELECT lower(name) AS name, upper(name) AS name FROM users ORDER BY 2 DESC"
+        );
+        assert!(
+            sorted_statements(
+                Engine::Pg,
+                &source,
+                &[true],
+                Some(&RunSort {
+                    column: "name".into(),
+                    column_index: 2,
+                    ascending: true,
+                }),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sort_rejects_writes_multiple_statements_and_bad_columns() {
+        let sort = RunSort {
+            column: "id".into(),
+            column_index: 0,
+            ascending: false,
+        };
+        assert!(
+            sorted_statements(
+                Engine::Sqlite,
+                &["DELETE FROM t".into()],
+                &[false],
+                Some(&sort)
+            )
+            .is_err()
+        );
+        assert!(
+            sorted_statements(
+                Engine::Sqlite,
+                &["SELECT 1".into(), "SELECT 2".into()],
+                &[true, true],
+                Some(&sort),
+            )
+            .is_err()
+        );
+        assert!(
+            sorted_statements(
+                Engine::Sqlite,
+                &["SELECT 1".into()],
+                &[true],
+                Some(&RunSort {
+                    column: String::new(),
+                    column_index: 0,
+                    ascending: true
+                }),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn run_request_deserializes_optional_sort() {
+        let request: RunRequest = serde_json::from_value(serde_json::json!({
+            "connId": "c",
+            "sql": "SELECT * FROM t",
+            "queryId": "q",
+            "sort": {"column": "name", "columnIndex": 0, "ascending": false}
+        }))
+        .unwrap();
+        let sort = request.sort.unwrap();
+        assert_eq!(sort.column, "name");
+        assert_eq!(sort.column_index, 0);
+        assert!(!sort.ascending);
     }
 
     #[test]

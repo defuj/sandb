@@ -3,11 +3,14 @@
 //!
 //! Rules: integers → number while JS holds them exactly, else string; numeric/decimal → string
 //! (keeps precision); floats → number; json → JSON value; bytes → `{"$bytes": base64, "len": n}`;
-//! NULL → null; the rest → text. With a cap (the grid preview), long text and bytes are cut.
+//! NULL → null; PostGIS geometry/geography → EWKT; the rest → text. With a cap (the grid
+//! preview), long text and bytes are cut.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Number, Value, json};
+
+use crate::core::db::wkb;
 
 /// Bytes shown per binary or text cell in the grid. CSV export passes `None` (no cap).
 pub const PREVIEW_BYTES: usize = 4096;
@@ -90,6 +93,9 @@ pub fn pg_text(type_name: &str, s: &str, cap: Option<usize>) -> Value {
         "FLOAT4" | "FLOAT8" => float_or_text(s),
         "JSON" | "JSONB" => json_or_text(s),
         "BYTEA" => pg_bytea(s).map_or_else(|| text(s), |b| bytes(&b, cap)),
+        // Types sqlx has not looked up are `?`; PostGIS geometry and geography among them
+        // arrive as hex EWKB and are shown as EWKT. Other values do not parse as EWKB.
+        "?" => wkb::hex_ewkb_to_wkt(s, cap).map_or_else(|| text_capped(s, cap), Value::String),
         // NUMERIC and MONEY stay strings on purpose; dates, uuid, enums, unknown types are text.
         _ => text_capped(s, cap),
     }
@@ -318,6 +324,18 @@ mod tests {
             sqlite_value("TEXT", SqliteRaw::Text(&wkt), Some(PREVIEW_BYTES)),
             pg_text("TEXT", &wkt, Some(PREVIEW_BYTES))
         );
+    }
+
+    #[test]
+    fn pg_unlooked_up_types_show_geometry_as_wkt_and_keep_other_text() {
+        // `SRID=4326;POINT(106.8 -6.2)` as PostGIS prints it.
+        let point = "0101000020E61000003333333333B35A40CDCCCCCCCCCC18C0";
+        assert_eq!(pg_text("?", point, None), json!("POINT(106.8 -6.2)"));
+        // Enums and other extension types are `?` too and stay as they are.
+        assert_eq!(pg_text("?", "active", None), json!("active"));
+        assert_eq!(pg_text("?", "0101", None), json!("0101"));
+        // A known text column that holds hex EWKB is the user's text, not a geometry.
+        assert_eq!(pg_text("TEXT", point, None), json!(point));
     }
 
     #[test]

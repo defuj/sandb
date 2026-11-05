@@ -26,6 +26,8 @@ pub const SNAPSHOT_MAX_TABLES: usize = 10_000;
 pub enum TableKind {
     Table,
     View,
+    /// PG materialized view: it stores rows, but is not a table.
+    Matview,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -39,6 +41,9 @@ pub struct TableInfo {
     /// SQLite only: the table has an implicit `rowid` (not `WITHOUT ROWID`, not a view).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_rowid: Option<bool>,
+    /// PG only: the parent table when this table is a partition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_of: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -400,6 +405,7 @@ mod tests {
             kind: TableKind::View,
             row_estimate: None,
             has_rowid: None,
+            partition_of: None,
         };
         assert_eq!(
             serde_json::to_value(&t).unwrap(),

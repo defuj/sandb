@@ -133,7 +133,7 @@ The editor has no tab model now. In `src/App.svelte:273-277`, "Query 1" is stati
 ## 3. Phase 4: AI service (backend)
 Goal: an OpenAI-compatible streaming client and a tool loop in Rust. No UI in this phase.
 
-1. Settings: base URL, model, privacy mode (`results` or `schema`), max rows (default 500), time limit (default 15 s). Store them in `settings.json`. Store the API key in the secret store (the encrypted `credentials.enc` in the app, memory in the bridge and the tests). Never write the key to a log.
+1. Settings: base URL, model, privacy mode (`results` or `schema`), max rows (default 500), time limit (default 15 s). Store them in `settings.json`. Store the API key in the secret store (the OS credential store in the app, memory in the bridge and the tests). Never write the key to a log.
 2. `core/ai/client.rs`: `POST {baseUrl}/chat/completions` with `stream: true`.
    - Parse SSE `data:` lines and handle `[DONE]`.
    - Collect partial tool calls by index.
@@ -189,25 +189,11 @@ The UI exists as a prototype on mock data: `ChatPanel.svelte` (with the inline a
    - deny writes nothing;
    - every case appears in the audit log.
 
-## 5. Phase 6: edit mode in the result grid
-The UI exists as a prototype on mock rows (`edits.svelte.ts`, `ResultsGrid.svelte`, `EditSaveDialog.svelte`). On real backends it now returns "Edit mode comes in a later phase" (`edits.svelte.ts:41`).
+## 5. Phase 6: edit mode integration checks
+Table Data views and simple query results support double-click editing. Live saves use primary keys, bound values and one transaction. Sorting runs before the row limit.
 
-1. `core/db/editable.rs`: use sqlparser to decide if a result can be edited. The result must come from one table, with no join, group, aggregate or computed column, and with the primary key columns present (or SQLite `rowid`). Return `{ table, pk }` or `{ reason }`.
-2. `core/db/edit.rs`: build `UPDATE`, `INSERT` and `DELETE` for each dialect.
-   - Quote identifiers.
-   - Bind values as parameters, not as literals.
-   - Handle NULL and the types (numbers, booleans, JSON, bytes, dates, arrays on PG).
-3. Save runs all statements in one transaction. On an error, roll back everything and return the index of the failing row, so the grid can mark it.
-4. Production: Save asks for one more confirmation. On Production with manual commit, decide if Save runs inside the tab transaction (see section 8, question 2).
-5. Read-only connection: Save is disabled (`canWrite`).
-6. Phase 2 left two items for this phase:
-   - MySQL binary columns: use the charset 63 check.
-   - Build SQL values from `dataType`.
-7. Tests:
-   - unit tests for SQL generation on each dialect;
-   - integration tests: save on each engine;
-   - a forced unique violation rolls back all changes.
-8. Review, then QA FULLSTACK.
+1. Run integration saves on PostgreSQL, MySQL, MariaDB and SQLite. Include a forced unique violation that rolls back all changes.
+2. Run QA FULLSTACK for table Data views and query results.
 
 ## 6. Phase 7: hardening and release
 1. `cargo clippy -D warnings` on the release features. Check that the CSP and capabilities are the minimum (`src-tauri/tauri.conf.json`, `src-tauri/capabilities/default.json`).
@@ -215,7 +201,7 @@ The UI exists as a prototype on mock rows (`edits.svelte.ts`, `ResultsGrid.svelt
 3. Check that the release binary does not contain the dev bridge: run `cargo tree -e features` and a `strings` check on the binary. The `run_read_only_unchecked`, `run_editor_unchecked` and `server_kill` test hooks are compiled only with `cfg(test)` or `feature = "it"`. Confirm that they are not in the release binary.
 4. Test the parts that QA could not test through the bridge:
    - the Tauri native CSV save dialog;
-   - the encrypted password file `credentials.enc` in the app data dir (save, read and delete a password);
+   - the OS credential store (Keychain, Credential Manager, Secret Service): save, read and delete a password, and the move of an old `credentials.enc` into the store on Windows and Linux;
    - the quit prompt from the real window.
 
    Screenshots of the Tauri window need the macOS Screen Recording permission.
