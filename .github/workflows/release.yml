@@ -2,6 +2,7 @@ name: Release
 
 # Push a tag such as v0.2.0 to build the macOS app and publish a GitHub Release.
 # The release includes latest.json, which installed apps read to find updates.
+# Both macOS architectures are built: Apple Silicon (arm64) and Intel (x86_64).
 on:
   push:
     tags: ['v*']
@@ -11,7 +12,19 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest # Apple Silicon
+    runs-on: macos-latest # Apple Silicon runner; the Intel target is cross-compiled
+    strategy:
+      fail-fast: false
+      # One architecture at a time: both jobs write to the same release and
+      # merge their entry into latest.json, so they must not run in parallel.
+      max-parallel: 1
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: Apple Silicon
+          - target: x86_64-apple-darwin
+            arch: Intel
+    name: release (${{ matrix.arch }})
     steps:
       - uses: actions/checkout@v4
 
@@ -28,9 +41,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       - run: pnpm install --frozen-lockfile
 
@@ -65,3 +81,4 @@ jobs:
           releaseBody: See CHANGELOG.md for the changes in this version.
           releaseDraft: false
           prerelease: false
+          args: --target ${{ matrix.target }}

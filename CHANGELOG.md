@@ -4,6 +4,8 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+- The macOS app also builds for Intel Macs. A release now ships an Apple Silicon build and an Intel build (the Intel disk image is named `sandb_<version>_x64.dmg`). Both update through the same `latest.json`.
+
 ## [0.5.0] - 2026-11-05
 
 - Releases now have a fixed code signature. After you update, macOS does not ask for your password again for each saved connection password. You must click "Always Allow" one more time after you install the first version with this change.
