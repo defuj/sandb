@@ -7,7 +7,8 @@ use tauri::menu::{Menu, MenuItem, MenuItemKind, WINDOW_SUBMENU_ID};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 
-use crate::core::secrets::{self, KeychainStore};
+use crate::core::ai::settings::AI_KEY_ACCOUNT;
+use crate::core::secrets::{self, KeychainStore, VaultStore};
 use crate::core::state::AppState;
 
 const QUIT_ID: &str = "sandb-quit";
@@ -86,13 +87,35 @@ pub fn run() {
                 }
                 None => (app.path().app_data_dir()?, app.config().identifier.clone()),
             };
-            let keychain = KeychainStore::new(service);
+            let vault = VaultStore::new(&dir, Box::new(KeychainStore::new(service.clone())));
             // Not fatal: the file stays and the next start tries again. Until then, the passwords
             // that were not moved are missing and those connections fail to log in.
-            if let Err(e) = secrets::migrate_legacy_file(&dir, &keychain) {
-                eprintln!("sandb: could not move saved passwords to the credential store: {e}");
+            if let Err(e) = secrets::migrate_legacy_file(&dir, &vault) {
+                eprintln!(
+                    "sandb: could not move saved passwords to {}: {e}",
+                    secrets::VAULT_FILE
+                );
             }
-            let state = AppState::new(dir, Box::new(keychain))?;
+            let state = AppState::new(dir, Box::new(vault))?;
+            let mut accounts: Vec<String> = state
+                .connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|c| secrets::password_account(&c.id))
+                .collect();
+            accounts.push(AI_KEY_ACCOUNT.to_string());
+            // Not fatal either: the old entries stay and the next start tries again.
+            if let Err(e) = secrets::migrate_keychain_entries(
+                &KeychainStore::new(service),
+                state.secrets.as_ref(),
+                &accounts,
+            ) {
+                eprintln!(
+                    "sandb: could not move saved passwords to {}: {e}",
+                    secrets::VAULT_FILE
+                );
+            }
             app.manage(state);
             app.set_menu(app_menu(app.handle())?)?;
             Ok(())
