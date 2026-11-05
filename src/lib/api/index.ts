@@ -42,6 +42,7 @@ function bridgeBackend(): Backend {
     saveAiSettings: (settings) => load.then((b) => b.saveAiSettings(settings)),
     setAiKey: (key) => load.then((b) => b.setAiKey(key)),
     testAi: (settings, key) => load.then((b) => b.testAi(settings, key)),
+    listAiModels: (settings, key) => load.then((b) => b.listAiModels(settings, key)),
     chatSend: (request, onEvent) => load.then((b) => b.chatSend(request, onEvent)),
     chatCancel: (chatId) => load.then((b) => b.chatCancel(chatId)),
   };

@@ -4,6 +4,7 @@
   import { look, canSeeThrough, backdropOn, lookChanged, setTheme, setBackgroundImage, removeBackgroundImage, resetBackdrop, type Backdrop } from '../appearance.svelte';
   import { api, ApiError } from '../api';
   import { appVersion, updates, checkForUpdates, installUpdate, restartApp, updatesEnabled as canUpdate } from '../updates.svelte';
+  import ModelPicker from './ModelPicker.svelte';
 
   let { onEnableWrites }: { onEnableWrites: (c: Conn) => void } = $props();
 
@@ -166,10 +167,10 @@
                 </button>
               </div>
             </label>
-            <label class="block">
+            <div class="block">
               <span class="label mb-1.5 block">Model</span>
-              <input class="input font-mono text-[12.5px]" bind:value={ai.model} oninput={changed} placeholder={providers[ai.provider].model} autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" />
-            </label>
+              <ModelPicker variant="field" placeholder={providers[ai.provider].model} onpick={changed} />
+            </div>
           </div>
 
           <div class="mt-3 flex items-center gap-3">

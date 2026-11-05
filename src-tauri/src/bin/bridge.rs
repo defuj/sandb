@@ -497,6 +497,13 @@ async fn dispatch(
             }
             .await,
         ),
+        "list_ai_models" => reply(
+            async {
+                let a: TestAiArgs = args(body)?;
+                ai_settings::models(st, a.settings, a.key).await
+            }
+            .await,
+        ),
         "chat_send" => match args::<ChatArgs>(body) {
             Ok(a) => chat_stream(ctx.clone(), a.request),
             Err(e) => reply::<()>(Err(e)),

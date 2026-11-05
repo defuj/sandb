@@ -382,6 +382,9 @@ export const mockBackend: Backend = {
   async testAi() {
     throw noAi();
   },
+  async listAiModels() {
+    throw noAi();
+  },
   async chatSend() {
     throw noAi();
   },

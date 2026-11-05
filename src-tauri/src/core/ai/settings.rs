@@ -142,6 +142,33 @@ pub fn set_key(state: &AppState, key: Option<String>) -> Result<(), AppError> {
     }
 }
 
+/// `key`: `None` uses the stored key, `Some("")` sends no key.
+fn resolve_key(state: &AppState, key: Option<String>) -> Result<Option<String>, AppError> {
+    match key {
+        None => stored_key(state),
+        Some(k) => Ok(Some(k.trim().to_string()).filter(|k| !k.is_empty())),
+    }
+}
+
+/// Model ids of `settings` (saved or not), sorted, without duplicates. The model field is not
+/// checked. `key`: as in [`test`].
+pub async fn models(
+    state: &AppState,
+    settings: AiSettings,
+    key: Option<String>,
+) -> Result<Vec<String>, AppError> {
+    let settings = settings.normalized()?;
+    let client = AiClient::new(settings.api(), &settings.base_url, resolve_key(state, key)?)?;
+    let mut models = client.list_models().await?;
+    models.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    models.dedup();
+    Ok(models)
+}
+
 /// Tests `settings` (saved or not): the server must answer `GET /models` and list the model.
 /// `key`: `None` uses the stored key, `Some("")` sends no key.
 pub async fn test(
@@ -153,11 +180,7 @@ pub async fn test(
     if settings.model.is_empty() {
         return Err(AppError::invalid("Enter a model name"));
     }
-    let key = match key {
-        None => stored_key(state)?,
-        Some(k) => Some(k.trim().to_string()).filter(|k| !k.is_empty()),
-    };
-    let client = AiClient::new(settings.api(), &settings.base_url, key)?;
+    let client = AiClient::new(settings.api(), &settings.base_url, resolve_key(state, key)?)?;
     let started = Instant::now();
     let models = client.list_models().await?;
     let latency_ms = started.elapsed().as_millis() as u64;

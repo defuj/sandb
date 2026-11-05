@@ -196,6 +196,35 @@ export async function removeAiKey() {
   ai.hasKey = false;
 }
 
+/** Models the AI server lists. `target`: the provider, URL and key that the list is for. */
+export const aiModels = $state({ list: [] as string[], loading: false, error: '', target: '' });
+let modelsSeq = 0;
+
+/** Loads the model list unless it is already loaded (or loading) for the current provider, URL and key. `force` loads again. */
+export async function loadAiModels(force = false) {
+  const target = [ai.provider, ai.baseUrl.trim().replace(/\/+$/, ''), ai.apiKey.trim() || (ai.hasKey ? '(saved)' : '')].join('\n');
+  if (!force && aiModels.target === target && (aiModels.loading || (aiModels.list.length && !aiModels.error))) return;
+  const seq = ++modelsSeq;
+  if (aiModels.target !== target) aiModels.list = [];
+  aiModels.target = target;
+  aiModels.loading = true;
+  aiModels.error = '';
+  try {
+    const list = await api.listAiModels(aiSettings(), ai.apiKey.trim() || null);
+    if (seq === modelsSeq) aiModels.list = list;
+  } catch (e) {
+    if (seq === modelsSeq) aiModels.error = ApiError.from(e).message;
+  } finally {
+    if (seq === modelsSeq) aiModels.loading = false;
+  }
+}
+
+/** Chooses the model for every chat and saves it. */
+export function setAiModel(model: string) {
+  ai.model = model.trim();
+  saveAiSoon();
+}
+
 // Stands in while there are no connections, so views that read active() keep working.
 const placeholder: Conn = { id: '', name: '', engine: 'pg', version: '', env: 'local', host: '', port: 0, database: '', user: '', ssl: 'prefer', file: '', aiWrite: false, readOnly: false, schema: 'prod' };
 

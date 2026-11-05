@@ -59,6 +59,7 @@ export const tauriBackend: Backend = {
   saveAiSettings: (settings) => call('save_ai_settings', { settings }),
   setAiKey: (key) => call('set_ai_key', { key }),
   testAi: (settings, key) => call('test_ai', { settings, key }),
+  listAiModels: (settings, key) => call('list_ai_models', { settings, key }),
   chatSend,
   chatCancel: (chatId) => call('chat_cancel', { chatId }),
 };

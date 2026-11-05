@@ -167,6 +167,7 @@ pub fn run() {
             commands::save_ai_settings,
             commands::set_ai_key,
             commands::test_ai,
+            commands::list_ai_models,
             commands::chat_send,
             commands::chat_cancel,
         ])

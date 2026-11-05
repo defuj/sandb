@@ -275,6 +275,16 @@ pub async fn test_ai(
     ai_settings::test(&state, settings, key).await
 }
 
+/// Model ids of the given (maybe unsaved) settings. `key` as in `test_ai`.
+#[tauri::command]
+pub async fn list_ai_models(
+    state: State<'_, AppState>,
+    settings: AiSettings,
+    key: Option<String>,
+) -> Res<Vec<String>> {
+    ai_settings::models(&state, settings, key).await
+}
+
 /// Streams the answer on `on_event`; it always ends with one `done` or `error` event.
 #[tauri::command]
 pub async fn chat_send(

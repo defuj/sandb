@@ -474,6 +474,8 @@ export interface Backend {
   setAiKey(key: string | null): Promise<void>;
   /** Lists the models of `settings` (maybe not saved) and fails with `model_not_found` when `settings.model` is not among them. `key`: null uses the stored key; an empty string sends none. */
   testAi(settings: AiSettings, key: string | null): Promise<AiTestResult>;
+  /** Model ids of `settings` (maybe not saved), sorted. `settings.model` is not checked. `key` as in `testAi`. */
+  listAiModels(settings: AiSettings, key: string | null): Promise<string[]>;
   /** Streams one reply to `onEvent` and resolves after the terminal `done` or `error` event. */
   chatSend(request: ChatRequest, onEvent: (e: ChatEvent) => void): Promise<void>;
   /** Stops a running reply; it then ends with an `error` event of code `cancelled`. An unknown id is not an error. */

@@ -4,7 +4,12 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-05
+
 - The macOS app also builds for Intel Macs. A release now ships an Apple Silicon build and an Intel build (the Intel disk image is named `sandb_<version>_x64.dmg`). Both update through the same `latest.json`.
+- You can choose the AI model from a list. sandb gets the list from your AI server (`GET /models`). In Settings > AI, click the Model field. In the assistant, click the model name at the top. Type to filter the list. Use the arrow keys and Enter, or click a model.
+- If the server does not list your model, type its full name and select "Use …". If sandb cannot get the list, the menu shows the error, and you can still type a name. The refresh button gets the list again.
+- The assistant and Settings use the same model. A new model applies from the next question.
 
 ## [0.5.0] - 2026-11-05
 
