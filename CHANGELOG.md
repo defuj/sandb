@@ -4,6 +4,10 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-05
+
+- The Rust crate version now agrees with the app version. Before, the crate showed 0.1.0.
+
 ## [0.4.0] - 2026-11-05
 
 - The results grid has no "Load more" button now. When you scroll near the last row, the grid gets the next rows. The footer shows the row count and the time of the last run, as before. While rows load, the footer shows "Loading more…". With pending edits, the grid does not load more rows.
