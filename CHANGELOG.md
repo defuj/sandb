@@ -4,6 +4,8 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-05
+
 - The editor completes column names in the statement, not only functions and keywords. In the `SELECT` list, `WHERE`, `GROUP BY`, `ORDER BY`, a join condition or `SET`, it lists the columns of the tables in that statement.
 - When the statement has an alias, the completion shows the columns of the table behind it. If two tables have a column with the same name, the editor inserts the name with its table or alias, for example `o.id`, so the query stays valid.
 - With no table in the statement, Ctrl+Space lists the columns of the whole database. Typing alone does not show that list.
