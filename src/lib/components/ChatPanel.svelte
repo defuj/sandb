@@ -568,11 +568,11 @@
     ></textarea>
     <div class="relative mt-1 flex items-center gap-2">
       {#if writesOn}
-        <button class="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[12px] font-medium text-amber-700 hover:bg-hover dark:text-amber-400" onclick={toggleMode} title="Writes need approval on {scopeConns.filter((c) => c.aiWrite).map((c) => c.name).join(', ')}. Click to switch back to read-only.">
+        <button class="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[12px] font-medium whitespace-nowrap text-amber-700 hover:bg-hover dark:text-amber-400" onclick={toggleMode} title="Writes need approval on {scopeConns.filter((c) => c.aiWrite).map((c) => c.name).join(', ')}. Click to switch back to read-only.">
           <ShieldOff size={13} /> Writes need approval
         </button>
       {:else}
-        <button class="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[12px] font-medium text-muted hover:bg-hover hover:text-ink disabled:opacity-40" onclick={toggleMode} disabled={!ready} aria-expanded={scopeConns.length > 1 ? writeMenu : undefined} title="Allow the assistant to propose writes">
+        <button class="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[12px] font-medium whitespace-nowrap text-muted hover:bg-hover hover:text-ink disabled:opacity-40" onclick={toggleMode} disabled={!ready} aria-expanded={scopeConns.length > 1 ? writeMenu : undefined} title="Allow the assistant to propose writes">
           <ShieldCheck size={13} class="text-emerald-600 dark:text-emerald-400" /> Read-only
         </button>
       {/if}
@@ -604,11 +604,11 @@
         <button class="fixed inset-0 z-40 cursor-default" aria-label="Close" onclick={() => (keysMenu = false)}></button>
       {/if}
       {#if chat.live && chat.cancel && !chat.question}
-        <button class="btn btn-primary size-7 rounded-lg p-0" onclick={() => chat.cancel?.()} aria-label="Stop" title="Stop the reply">
+        <button class="btn btn-primary size-7 shrink-0 rounded-lg p-0" onclick={() => chat.cancel?.()} aria-label="Stop" title="Stop the reply">
           <Square size={11} class="fill-current" />
         </button>
       {:else}
-        <button class="btn btn-primary size-7 rounded-lg p-0" onclick={() => submit()} disabled={chat.question ? !input.trim() : !!chat.live || !input.trim() || !ready} aria-label={chat.question ? 'Send answer' : 'Send'}>
+        <button class="btn btn-primary size-7 shrink-0 rounded-lg p-0" onclick={() => submit()} disabled={chat.question ? !input.trim() : !!chat.live || !input.trim() || !ready} aria-label={chat.question ? 'Send answer' : 'Send'}>
           <ArrowUp size={15} />
         </button>
       {/if}

@@ -60,14 +60,14 @@
 <svelte:window onkeydown={(e) => { if (menu && e.key === 'Escape') menu = false; }} />
 
 <!-- The chip menu opens upward and takes the width of the nearest positioned parent (the composer row), so a narrow panel does not cut it. -->
-<div class={variant === 'field' ? 'relative w-full' : 'min-w-0'}>
+<div class={variant === 'field' ? 'relative w-full' : 'min-w-0 max-w-44'}>
   {#if variant === 'field'}
     <button type="button" class="input flex w-full items-center gap-2 text-left font-mono text-[12.5px]" aria-haspopup="listbox" aria-expanded={menu} onclick={open}>
       <span class="min-w-0 flex-1 truncate {ai.model ? '' : 'text-faint'}">{ai.model || placeholder || 'Choose a model'}</span>
       <ChevronsUpDown size={13} class="shrink-0 text-faint" />
     </button>
   {:else}
-    <button type="button" class="flex h-6 max-w-44 min-w-0 items-center gap-1 rounded-md px-1.5 font-mono text-[11.5px] text-muted hover:bg-hover hover:text-ink {menu ? 'bg-hover text-ink' : ''}" aria-haspopup="listbox" aria-expanded={menu} title="Model: {ai.model || 'none'}. Click to change." onclick={open}>
+    <button type="button" class="flex h-6 max-w-full min-w-0 items-center gap-1 rounded-md px-1.5 font-mono text-[11.5px] text-muted hover:bg-hover hover:text-ink {menu ? 'bg-hover text-ink' : ''}" aria-haspopup="listbox" aria-expanded={menu} title="Model: {ai.model || 'none'}. Click to change." onclick={open}>
       <span class="min-w-0 truncate">{ai.model || 'Choose a model'}</span>
       <ChevronDown size={11} class="shrink-0" />
     </button>
