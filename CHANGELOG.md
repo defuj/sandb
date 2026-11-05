@@ -4,6 +4,11 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+- The editor completes column names in the statement, not only functions and keywords. In the `SELECT` list, `WHERE`, `GROUP BY`, `ORDER BY`, a join condition or `SET`, it lists the columns of the tables in that statement.
+- When the statement has an alias, the completion shows the columns of the table behind it. If two tables have a column with the same name, the editor inserts the name with its table or alias, for example `o.id`, so the query stays valid.
+- With no table in the statement, Ctrl+Space lists the columns of the whole database. Typing alone does not show that list.
+- After `FROM`, `JOIN`, `UPDATE` and `INSERT INTO`, the editor still completes table names. After `table.` or `alias.` it still completes the columns of that one table. A table written as `public.orders` uses the columns of the snapshot's `orders`. If the snapshot has no columns for a table, the editor asks the database once and keeps the answer.
+
 ## [0.7.0] - 2026-11-05
 
 - The model menu of the assistant moved from the header to the bottom of the message box, next to "Read-only". The menu opens upward.
