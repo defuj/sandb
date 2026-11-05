@@ -1,6 +1,6 @@
 [package]
 name = "sandb"
-version = "0.4.1"
+version = "0.4.2"
 description = "Light database client with a BYOK AI chat"
 edition = "2024"
 rust-version = "1.90"

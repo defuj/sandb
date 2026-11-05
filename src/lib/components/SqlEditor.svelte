@@ -4,8 +4,8 @@
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll as selectAllCmd } from '@codemirror/commands';
   import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
-  import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
-  import { autocompletion } from '@codemirror/autocomplete';
+  import { syntaxHighlighting, HighlightStyle, syntaxTree } from '@codemirror/language';
+  import { autocompletion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
   import { tags as t } from '@lezer/highlight';
 
   let {
@@ -13,10 +13,74 @@
     onrun,
     schema = {},
     dialect = 'pg',
-  }: { value?: string; onrun?: () => void; schema?: Record<string, string[]>; dialect?: 'pg' | 'mysql' | 'sqlite' } = $props();
+    columnsOf,
+  }: {
+    value?: string;
+    onrun?: () => void;
+    schema?: Record<string, string[]>;
+    dialect?: 'pg' | 'mysql' | 'sqlite';
+    /** Columns of a table that `schema` holds without columns (or not under this name); [] when unknown. */
+    columnsOf?: (path: string[]) => Promise<string[]>;
+  } = $props();
 
   const lang = new Compartment();
   const langExt = () => sql({ dialect: { pg: PostgreSQL, mysql: MySQL, sqlite: SQLite }[dialect], schema, upperCaseKeywords: true });
+
+  // Fetched columns per `schema` object; a new snapshot clears them.
+  let fetched = new Map<string, Promise<string[]>>();
+  let fetchedFor: Record<string, string[]> | undefined;
+
+  /** `FROM t a` / `FROM t AS a` aliases of the statement at `pos` → table path. Same scan as lang-sql. */
+  function aliasesAt(state: EditorState, pos: number): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    let stmt = syntaxTree(state).resolveInner(pos, -1);
+    while (stmt.name !== 'Statement') {
+      if (!stmt.parent) return out;
+      stmt = stmt.parent;
+    }
+    const isId = (n: typeof stmt | null) => n?.name === 'Identifier' || n?.name === 'QuotedIdentifier';
+    const text = (n: typeof stmt) => state.sliceDoc(n.from, n.to).replace(/^(["`])(.*)\1$/, '$2');
+    const pathOf = (n: typeof stmt) => (n.name === 'CompositeIdentifier' ? n.getChildren('Identifier').concat(n.getChildren('QuotedIdentifier')).sort((a, b) => a.from - b.from).map(text) : [text(n)]);
+    let sawFrom = false;
+    let prev: typeof stmt | null = null;
+    for (let n = stmt.firstChild; n; n = n.nextSibling) {
+      const kw = n.name === 'Keyword' ? state.sliceDoc(n.from, n.to).toLowerCase() : null;
+      let alias: string | null = null;
+      if (!sawFrom) sawFrom = kw === 'from';
+      else if (kw === 'as' && prev && isId(n.nextSibling)) alias = text(n.nextSibling!);
+      else if (kw && /^(where|group|having|order|union|intersect|except|all|distinct|limit|offset|fetch|for)$/.test(kw)) break;
+      else if (prev && isId(n)) alias = text(n);
+      if (alias && prev) out[alias] = pathOf(prev);
+      prev = /Identifier$/.test(n.name) ? n : null;
+    }
+    return out;
+  }
+
+  /**
+   * Columns after `table.` or `alias.` when the snapshot has none for that table: it cut them (column
+   * cap) or names the table differently (a PG table outside `public`, written without its schema).
+   */
+  async function lazyColumns(ctx: CompletionContext): Promise<CompletionResult | null> {
+    const m = /((?:(?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`)\.)+)([\w$]*)$/.exec(ctx.state.sliceDoc(ctx.state.doc.lineAt(ctx.pos).from, ctx.pos));
+    if (!m || !columnsOf) return null;
+    let path = m[1].slice(0, -1).match(/"[^"]+"|`[^`]+`|[^.]+/g)!.map((p) => p.replace(/^(["`])(.*)\1$/, '$2'));
+    if (path.length === 1) path = aliasesAt(ctx.state, ctx.pos)[path[0]] ?? path;
+    const key = path.join('.');
+    if (schema[key]?.length) return null; // lang-sql completes it
+    if (fetchedFor !== schema) {
+      fetched = new Map();
+      fetchedFor = schema;
+    }
+    let p = fetched.get(key);
+    if (!p) {
+      const cache = fetched;
+      p = columnsOf(path).catch(() => (cache.delete(key), []));
+      cache.set(key, p);
+    }
+    const cols = await p;
+    if (!cols.length || ctx.aborted) return null;
+    return { from: ctx.pos - m[2].length, options: cols.map((label) => ({ label, type: 'property' })), validFor: /^[\w$]*$/ };
+  }
 
   export function focus() {
     view?.focus();
@@ -133,6 +197,7 @@
           keymap.of([{ key: 'Mod-Enter', run: () => (onrun?.(), true) }, ...defaultKeymap, ...historyKeymap]),
           lang.of(langExt()),
           autocompletion(),
+          EditorState.languageData.of(() => [{ autocomplete: lazyColumns }]),
           syntaxHighlighting(hl),
           theme,
           EditorView.updateListener.of((u) => {

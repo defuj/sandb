@@ -4,6 +4,10 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-05
+
+- Fixed: autocomplete after `table.` or `alias.` showed no columns for some tables. On a large database, the schema snapshot keeps only the first 2000 columns, so later tables had no columns. Now the editor gets the columns of such a table from the database when you need them. This also applies to a PostgreSQL table outside `public` when you write it without its schema and its name is unique.
+
 ## [0.4.1] - 2026-11-05
 
 - The Rust crate version now agrees with the app version. Before, the crate showed 0.1.0.

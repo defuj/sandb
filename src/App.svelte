@@ -282,6 +282,22 @@
     );
   });
 
+  /**
+   * Autocomplete columns of a table the snapshot holds without columns (cut by the column cap), or of a
+   * PG table outside `public` written without its schema (only when the name is unique).
+   */
+  async function columnsOf(path: string[]): Promise<string[]> {
+    const c = conn;
+    const d = database;
+    if (isMock || snapshot?.key !== `${c.id}/${d}` || path.length > 2) return [];
+    const [ns, name] = path.length === 2 ? path : [undefined, path[0]];
+    const hits = snapshot.tables.filter((t) => t.name === name && (ns === undefined || t.schema === ns));
+    const t = hits.find((t) => !t.schema || t.schema === 'public') ?? (hits.length === 1 ? hits[0] : undefined);
+    if (!t) return [];
+    if (t.columns.length) return t.columns.map((x) => x.name);
+    return (await api.listColumns(c.id, d, t.schema ?? null, t.name)).map((x) => x.name);
+  }
+
   // Pending edits belong to the previous tab's (or connection's) result.
   $effect(() => {
     tab.id;
@@ -928,7 +944,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} {columnsOf} dialect={conn.engine} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />
