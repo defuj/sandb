@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
+  import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll as selectAllCmd } from '@codemirror/commands';
   import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
@@ -160,7 +160,7 @@
     '&': { height: '100%', fontSize: '13px', backgroundColor: 'transparent', color: 'var(--c-ink)' },
     '&.cm-focused': { outline: 'none' },
     '.cm-scroller': { fontFamily: "'JetBrains Mono Variable', ui-monospace, monospace", lineHeight: '1.6' },
-    '.cm-content': { caretColor: 'var(--c-accent)', padding: '2px 0 8px' },
+    '.cm-content': { padding: '2px 0 8px' },
     '.cm-gutters': { backgroundColor: 'transparent', border: 'none', color: 'var(--c-faint)', paddingLeft: '10px', paddingRight: '4px' },
     '.cm-activeLine': { backgroundColor: 'var(--c-hover)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--c-ink)' },
@@ -178,6 +178,8 @@
         doc: value,
         extensions: [
           lineNumbers(),
+          // CodeMirror draws the cursor: WebKit (Tauri) drops the native caret under the glass panels.
+          drawSelection(),
           highlightActiveLine(),
           history(),
           keymap.of([{ key: 'Mod-Enter', run: () => (onrun?.(), true) }, ...defaultKeymap, ...historyKeymap]),
