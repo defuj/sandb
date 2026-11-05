@@ -4,6 +4,13 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-05
+
+- In a narrow assistant panel, "Read-only" and "Writes need approval" stay on one line. The model name gets shorter with "…" and stays before the "i" button. The send button keeps its size.
+- Fewer Keychain prompts after an update. sandb now keeps all saved passwords and the AI API key in one encrypted file, `secrets.enc`, in the data folder. The key of that file is the only sandb entry in the credential store of the operating system. Before, each password had its own entry, and macOS asked for each entry again after each update. Now macOS asks one time per update.
+- On the first start of this version, sandb moves the old Keychain entries into `secrets.enc` and then removes them. macOS can ask one more time for each old entry. If the move stops, the old entries stay, and sandb tries again at the next start.
+- Fixed: the notes of 0.5.0 said that the fixed code signature keeps the "Always Allow" permission after an update. This is not true. The certificate is self-signed, so macOS keeps the permission for one build only.
+
 ## [0.7.1] - 2026-11-05
 
 - The editor completes column names in the statement, not only functions and keywords. In the `SELECT` list, `WHERE`, `GROUP BY`, `ORDER BY`, a join condition or `SET`, it lists the columns of the tables in that statement.
