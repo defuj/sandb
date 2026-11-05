@@ -4,6 +4,10 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-05
+
+- Fixed: the SQL editor did not always show the cursor in the macOS app. Now the editor draws the cursor itself, so you can always see it.
+
 ## [0.7.2] - 2026-11-05
 
 - In a narrow assistant panel, "Read-only" and "Writes need approval" stay on one line. The model name gets shorter with "…" and stays before the "i" button. The send button keeps its size.
