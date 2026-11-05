@@ -7,6 +7,8 @@
   import { syntaxHighlighting, HighlightStyle, syntaxTree } from '@codemirror/language';
   import { autocompletion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
   import { tags as t } from '@lezer/highlight';
+  import { columnCompletion } from '../sql/columns';
+  import { statementRanges } from '../sql/text';
 
   let {
     value = $bindable(''),
@@ -57,16 +59,17 @@
   }
 
   /**
-   * Columns after `table.` or `alias.` when the snapshot has none for that table: it cut them (column
-   * cap) or names the table differently (a PG table outside `public`, written without its schema).
+   * Columns of one table: from the snapshot when it has them, else from the database (the snapshot's
+   * column cap cut them, or a PG table outside `public` is written without its schema). Cached per
+   * snapshot, so typing does not ask again.
    */
-  async function lazyColumns(ctx: CompletionContext): Promise<CompletionResult | null> {
-    const m = /((?:(?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`)\.)+)([\w$]*)$/.exec(ctx.state.sliceDoc(ctx.state.doc.lineAt(ctx.pos).from, ctx.pos));
-    if (!m || !columnsOf) return null;
-    let path = m[1].slice(0, -1).match(/"[^"]+"|`[^`]+`|[^.]+/g)!.map((p) => p.replace(/^(["`])(.*)\1$/, '$2'));
-    if (path.length === 1) path = aliasesAt(ctx.state, ctx.pos)[path[0]] ?? path;
+  async function loadColumns(path: string[]): Promise<string[]> {
     const key = path.join('.');
-    if (schema[key]?.length) return null; // lang-sql completes it
+    if (schema[key]?.length) return schema[key];
+    // The snapshot names a `public` PG table (and a `main` SQLite table) without its schema.
+    const known = dialect === 'pg' && path.length === 2 && path[0] === 'public' ? schema[path[1]] : dialect === 'sqlite' && path.length === 2 && path[0] === 'main' ? schema[path[1]] : undefined;
+    if (known?.length) return known;
+    if (!columnsOf) return [];
     if (fetchedFor !== schema) {
       fetched = new Map();
       fetchedFor = schema;
@@ -77,10 +80,26 @@
       p = columnsOf(path).catch(() => (cache.delete(key), []));
       cache.set(key, p);
     }
-    const cols = await p;
+    return p;
+  }
+
+  /**
+   * Columns after `table.` or `alias.` when the snapshot has none for that table: it cut them (column
+   * cap) or names the table differently (a PG table outside `public`, written without its schema).
+   */
+  async function lazyColumns(ctx: CompletionContext): Promise<CompletionResult | null> {
+    const m = /((?:(?:[A-Za-z_][\w$]*|"[^"]+"|`[^`]+`)\.)+)([\w$]*)$/.exec(ctx.state.sliceDoc(ctx.state.doc.lineAt(ctx.pos).from, ctx.pos));
+    if (!m || !columnsOf) return null;
+    let path = m[1].slice(0, -1).match(/"[^"]+"|`[^`]+`|[^.]+/g)!.map((p) => p.replace(/^(["`])(.*)\1$/, '$2'));
+    if (path.length === 1) path = aliasesAt(ctx.state, ctx.pos)[path[0]] ?? path;
+    if (schema[path.join('.')]?.length) return null; // lang-sql completes it
+    const cols = await loadColumns(path);
     if (!cols.length || ctx.aborted) return null;
     return { from: ctx.pos - m[2].length, options: cols.map((label) => ({ label, type: 'property' })), validFor: /^[\w$]*$/ };
   }
+
+  /** Columns of the tables in the statement at the cursor, so a plain `SELECT col…` lists them. */
+  const columnsInScope = (ctx: CompletionContext) => columnCompletion(ctx, { dialect, schema, load: loadColumns });
 
   export function focus() {
     view?.focus();
@@ -119,43 +138,10 @@
     if (!view) return '';
     const doc = view.state.doc.toString();
     const head = view.state.selection.main.head;
-    const parts = statementRanges(doc)
+    const parts = statementRanges(doc, dialect)
       .map(([from, to]) => ({ to, text: doc.slice(from, to).trim() }))
       .filter((p) => p.text && p.text !== ';');
     return (parts.find((p) => head <= p.to) ?? parts.at(-1))?.text ?? '';
-  }
-
-  /**
-   * Cuts the text at `;` outside strings, quoted names, comments and Postgres dollar quotes, like the
-   * backend split. Each range ends after its `;`; the last one may have none.
-   */
-  function statementRanges(doc: string): [number, number][] {
-    const out: [number, number][] = [];
-    const skipTo = (i: number, s: string) => {
-      const e = doc.indexOf(s, i);
-      return e < 0 ? doc.length : e + s.length - 1;
-    };
-    let start = 0;
-    for (let i = 0; i < doc.length; i++) {
-      const ch = doc[i];
-      if ((ch === '-' && doc[i + 1] === '-') || (ch === '#' && dialect === 'mysql')) i = skipTo(i, '\n');
-      else if (ch === '/' && doc[i + 1] === '*') i = skipTo(i + 2, '*/');
-      else if (ch === "'" || ch === '"' || (ch === '`' && dialect === 'mysql')) {
-        // A doubled quote stays inside the string; MySQL also escapes with a backslash.
-        let j = i + 1;
-        while (j < doc.length && !(doc[j] === ch && doc[j + 1] !== ch)) j += doc[j] === ch || (doc[j] === '\\' && dialect === 'mysql') ? 2 : 1;
-        i = j;
-      } else if (ch === '$' && dialect === 'pg') {
-        // $$ or $tag$ opens a dollar quote; $1 (a parameter) does not match.
-        const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(doc.slice(i, i + 64))?.[0];
-        if (tag) i = skipTo(i + tag.length, tag);
-      } else if (ch === ';') {
-        out.push([start, i + 1]);
-        start = i + 1;
-      }
-    }
-    if (start < doc.length) out.push([start, doc.length]);
-    return out;
   }
 
   let el: HTMLDivElement;
@@ -197,7 +183,7 @@
           keymap.of([{ key: 'Mod-Enter', run: () => (onrun?.(), true) }, ...defaultKeymap, ...historyKeymap]),
           lang.of(langExt()),
           autocompletion(),
-          EditorState.languageData.of(() => [{ autocomplete: lazyColumns }]),
+          EditorState.languageData.of(() => [{ autocomplete: columnsInScope }, { autocomplete: lazyColumns }]),
           syntaxHighlighting(hl),
           theme,
           EditorView.updateListener.of((u) => {
