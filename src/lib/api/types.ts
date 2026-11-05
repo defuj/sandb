@@ -151,6 +151,8 @@ export interface StatementResult {
   affected?: number;
   /** A plain read: "Load more" and export may run it again. */
   isRead: boolean;
+  /** The lone read is a query (not EXPLAIN / SHOW), so the grid may sort it server-side. */
+  sortable: boolean;
   elapsedMs: number;
   /** Mock only: the table the prototype's edit mode works on. */
   table?: string;

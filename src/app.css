@@ -96,6 +96,14 @@ html.glass .card .bg-sunken:not(:where(.dialog, .popover, thead.sticky) *, thead
 ::-webkit-scrollbar-thumb:hover { background-color: var(--c-faint); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
+/* Read-only SQL in the assistant (lib/highlight.ts), in the same colors as the editor. */
+.tok-kw { color: var(--c-accent); font-weight: 500; }
+.tok-str { color: var(--c-syn-string); }
+.tok-num { color: var(--c-syn-number); }
+.tok-cmt { color: var(--c-faint); font-style: italic; }
+.tok-op { color: var(--c-muted); }
+.tok-type { color: var(--c-syn-type); }
+
 @utility btn {
   @apply inline-flex items-center justify-center gap-1.5 h-7 px-2.5 rounded-md text-[12.5px] font-medium whitespace-nowrap transition-colors select-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed;
 }

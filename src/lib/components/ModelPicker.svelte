@@ -3,7 +3,7 @@
   import { Check, ChevronDown, ChevronsUpDown, LoaderCircle, RotateCw, Settings } from '@lucide/svelte';
   import { ui, ai, aiModels, loadAiModels, setAiModel } from '../state.svelte';
 
-  // One model for every chat. `field`: the Settings input; `chip`: the small button in the chat header.
+  // One model for every chat. `field`: the Settings input; `chip`: the small button in the chat composer.
   let { variant, placeholder = '', onpick }: { variant: 'field' | 'chip'; placeholder?: string; onpick?: () => void } = $props();
 
   let menu = $state(false);
@@ -59,22 +59,22 @@
 
 <svelte:window onkeydown={(e) => { if (menu && e.key === 'Escape') menu = false; }} />
 
-<!-- The chip menu takes the width of the nearest positioned parent (the chat header), so a narrow panel does not cut it. -->
-<div class={variant === 'field' ? 'relative w-full' : 'ml-auto min-w-0'}>
+<!-- The chip menu opens upward and takes the width of the nearest positioned parent (the composer row), so a narrow panel does not cut it. -->
+<div class={variant === 'field' ? 'relative w-full' : 'min-w-0'}>
   {#if variant === 'field'}
     <button type="button" class="input flex w-full items-center gap-2 text-left font-mono text-[12.5px]" aria-haspopup="listbox" aria-expanded={menu} onclick={open}>
       <span class="min-w-0 flex-1 truncate {ai.model ? '' : 'text-faint'}">{ai.model || placeholder || 'Choose a model'}</span>
       <ChevronsUpDown size={13} class="shrink-0 text-faint" />
     </button>
   {:else}
-    <button type="button" class="flex max-w-44 min-w-0 items-center gap-0.5 rounded-md py-0.5 pr-1 pl-1.5 font-mono text-[11px] text-faint hover:bg-hover hover:text-ink {menu ? 'bg-hover text-ink' : ''}" aria-haspopup="listbox" aria-expanded={menu} title="Model: {ai.model || 'none'}. Click to change." onclick={open}>
+    <button type="button" class="flex h-6 max-w-44 min-w-0 items-center gap-1 rounded-md px-1.5 font-mono text-[11.5px] text-muted hover:bg-hover hover:text-ink {menu ? 'bg-hover text-ink' : ''}" aria-haspopup="listbox" aria-expanded={menu} title="Model: {ai.model || 'none'}. Click to change." onclick={open}>
       <span class="min-w-0 truncate">{ai.model || 'Choose a model'}</span>
       <ChevronDown size={11} class="shrink-0" />
     </button>
   {/if}
 
   {#if menu}
-    <div class="popover absolute top-full z-50 mt-1 flex max-h-80 flex-col p-1 {variant === 'field' ? 'right-0 w-full min-w-80 max-w-[calc(100vw-2rem)]' : 'inset-x-2'}">
+    <div class="popover absolute z-50 flex max-h-80 flex-col p-1 {variant === 'field' ? 'top-full mt-1 right-0 w-full min-w-80 max-w-[calc(100vw-2rem)]' : 'bottom-full mb-1 inset-x-0'}">
       <div class="mb-1 flex shrink-0 items-center gap-1">
         <!-- svelte-ignore a11y_autofocus -->
         <input

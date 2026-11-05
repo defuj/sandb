@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { ArrowUp, Square, ShieldCheck, ShieldOff, Database, Ban, LoaderCircle, Clock, Check, X, Copy, Sparkles, History, SquarePen, Trash2, MessageCircleQuestion, TriangleAlert, ArrowLeft, ChevronRight, RotateCw, Table2, FileCode, FileSpreadsheet, Braces, ChartColumn, FileDown } from '@lucide/svelte';
+  import { ArrowUp, Square, ShieldCheck, ShieldOff, Ban, LoaderCircle, Clock, Check, X, Copy, Sparkles, History, SquarePen, Trash2, MessageCircleQuestion, TriangleAlert, ArrowLeft, ChevronRight, RotateCw, Table2, FileCode, FileSpreadsheet, Braces, ChartColumn, FileDown, ListCollapse, ListTree, Info } from '@lucide/svelte';
   import Markdown from './Markdown.svelte';
   import ChartView from './ChartView.svelte';
   import ChatScope from './ChatScope.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import { chat, send, current, sessionsByDate, openSession, deleteSession, decide, answer, rerun, scopeOf, setScope, connOf, dbOf, type Part, type ToolPart, type Source } from '../chat.svelte';
+  import { sqlHtml } from '../highlight';
   import { api, ApiError } from '../api';
   import { replyPdf, pdfName } from '../report';
   import { ui, ai, engines, envTag, type Conn } from '../state.svelte';
@@ -44,11 +45,12 @@
   });
 
   // ---- tool steps ----
-  /** Consecutive tool steps of one reply form one timeline; `at` is the index of each part in the message. */
+  /** Consecutive tool steps of one reply form one timeline; `at` is the index of each part in the message. `skip` leaves parts out. */
   type Block = { kind: 'part'; p: Exclude<Part, ToolPart>; at: number } | { kind: 'steps'; steps: { p: ToolPart; at: number }[] };
-  function blocks(parts: Part[]): Block[] {
+  function blocks(parts: Part[], skip?: (p: Part, at: number) => boolean): Block[] {
     const out: Block[] = [];
     parts.forEach((p, at) => {
+      if (skip?.(p, at)) return;
       const last = out.at(-1);
       if (p.kind !== 'tool') out.push({ kind: 'part', p, at });
       else if (last?.kind === 'steps') last.steps.push({ p, at });
@@ -57,14 +59,45 @@
     return out;
   }
 
-  // Open state the user chose, per step. Without a choice: open while it runs, waits or failed, and for the last result with rows.
+  // ---- results only ----
+  // With steps hidden, a reply shows one summary line, then its result: the text after its last
+  // data step, charts, errors and questions that wait for an answer. A write that waits for approval always shows.
+  const PROCESS_KEY = 'sandb.chat.steps';
+  let showSteps = $state(localStorage.getItem(PROCESS_KEY) !== 'hidden');
+  function toggleSteps() {
+    showSteps = !showSteps;
+    try {
+      localStorage.setItem(PROCESS_KEY, showSteps ? 'shown' : 'hidden');
+    } catch (e) {
+      console.warn('The steps setting was not saved.', e);
+    }
+  }
+  /** Replies whose steps the user opened while steps are hidden. */
+  let revealed = $state<Record<string, boolean>>({});
+  /** Steps that read data. A chart step only draws the chart part, so it is not work. */
+  const workSteps = (parts: Part[]) => parts.filter((x): x is ToolPart => x.kind === 'tool' && x.name !== 'render_chart');
+  /** Index of the last data step; the text before it narrates the work. */
+  function workEnd(parts: Part[]) {
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const x = parts[i];
+      if (x.kind === 'tool' && x.name !== 'render_chart') return i;
+    }
+    return -1;
+  }
+  /** Narration and answered questions before the last data step, and every step except a write that waits for approval. */
+  function processPart(p: Part, at: number, end: number) {
+    if (p.kind === 'text') return at < end;
+    if (p.kind === 'question') return at < end && p.answer !== undefined;
+    return p.kind === 'tool' && !(p.status === 'awaiting' && !!chat.pending);
+  }
+
+  // Open state the user chose, per step. Without a choice: closed, except while it waits for approval or after it failed.
   let opened = $state<Record<string, boolean>>({});
   const stepKey = (mi: number, at: number) => `${session?.id}:${mi}:${at}`;
-  function isOpen(parts: Part[], p: ToolPart, key: string, at: number) {
-    if (p.status === 'running' || (p.status === 'awaiting' && !!chat.pending)) return true;
+  function isOpen(p: ToolPart, key: string) {
+    if (p.status === 'awaiting' && !!chat.pending) return true;
     if (key in opened) return opened[key];
-    if (p.status === 'blocked' || p.status === 'denied') return true;
-    return !!p.rows && !parts.slice(at + 1).some((x) => x.kind === 'tool' && !!x.rows);
+    return p.status === 'blocked' || p.status === 'denied';
   }
 
   /** Selected cell of a result table, shown in full under it. */
@@ -172,6 +205,7 @@
 
   /** On: writes off on every connection of the chat. Off: the safeguard dialog for the one connection, or a choice of them. */
   let writeMenu = $state(false);
+  let keysMenu = $state(false);
   function toggleMode() {
     if (writesOn) for (const c of scopeConns) c.aiWrite = false;
     else if (scopeConns.length === 1) onEnableWrites(scopeConns[0]);
@@ -229,16 +263,19 @@
 </script>
 
 <section class="card absolute inset-y-2 right-2 z-30 flex max-w-[calc(100%-1rem)] flex-col overflow-hidden shadow-2xl min-[880px]:relative min-[880px]:inset-auto min-[880px]:min-w-[280px] min-[880px]:shadow-[var(--card-shadow)]" style:width="{ui.chatWidth}px">
-  <header class="relative flex h-11 shrink-0 items-center gap-1 pr-2 pl-4">
+  <header class="relative flex h-11 shrink-0 items-center gap-1 border-b border-line pr-2 pl-4">
     <span class="mr-1 text-[13px] font-semibold">{showHistory ? 'Chats' : 'Assistant'}</span>
-    <ModelPicker variant="chip" />
+    <div class="flex-1"></div>
+    {#if !showHistory}
+      <button class="btn btn-ghost size-7 p-0 {showSteps ? '' : 'bg-hover text-ink'}" onclick={toggleSteps} aria-pressed={!showSteps} title={showSteps ? 'Hide steps, show only results (⇧⌘H)' : 'Show steps (⇧⌘H)'} aria-label={showSteps ? 'Hide steps' : 'Show steps'}><ListCollapse size={14} /></button>
+    {/if}
     <button class="btn btn-ghost size-7 p-0 {showHistory ? 'bg-hover text-ink' : ''}" onclick={() => (showHistory = !showHistory)} disabled={!!chat.live} aria-pressed={showHistory} title={chat.live ? 'Wait for the reply to finish' : 'Chat history'} aria-label="Chat history"><History size={14} /></button>
     <button class="btn btn-ghost size-7 p-0" onclick={newChat} disabled={!!chat.live || (!session && !showHistory)} title="New chat" aria-label="New chat"><SquarePen size={14} /></button>
     <button class="btn btn-ghost size-7 p-0" onclick={() => (ui.chatOpen = false)} aria-label="Close assistant"><X size={14} /></button>
   </header>
 
   {#if showHistory}
-    <div class="flex-1 overflow-auto px-2 pt-1 pb-3">
+    <div class="flex-1 overflow-auto px-2 pt-2 pb-3">
       <button class="nav-item mb-1 text-muted" onclick={() => (showHistory = false)}><ArrowLeft size={13} /> Back to chat</button>
       <div class="px-2 pt-2 pb-1.5 text-[11.5px] font-medium text-faint">All chats</div>
       {#each past as s (s.id)}
@@ -254,7 +291,7 @@
       {/each}
     </div>
   {:else}
-  <div bind:this={list} class="flex-1 space-y-4 overflow-auto px-4 pt-1 pb-4">
+  <div bind:this={list} class="flex-1 space-y-4 overflow-auto px-4 pt-3 pb-4">
     {#if messages.length === 0}
       <div class="pt-8">
         <div class="grid size-8 place-items-center rounded-lg bg-accent/12 text-accent"><Sparkles size={15} /></div>
@@ -274,8 +311,21 @@
       {#if m.role === 'user'}
         <div class="ml-auto w-fit max-w-[85%] rounded-xl rounded-br-sm bg-active px-3 py-2 text-ink">{(m.parts[0] as { text: string }).text}</div>
       {:else}
+        {@const work = workSteps(m.parts)}
+        {@const end = workEnd(m.parts)}
+        {@const compact = !showSteps && !!m.parts.some((x) => x.kind === 'tool')}
+        {@const rk = `${session?.id}:${mi}`}
+        {@const hide = compact && !revealed[rk]}
         <div class="space-y-2.5">
-          {#each blocks(m.parts) as b}
+          {#if compact && work.length}
+            {@const working = chat.live && m === messages.at(-1) && busy(m.parts)}
+            <button class="-ml-1 flex h-6 items-center gap-1.5 rounded px-1 text-[12px] text-faint hover:bg-hover hover:text-ink" aria-expanded={!hide} onclick={() => (revealed[rk] = !revealed[rk])} title={hide ? 'Show the steps of this reply' : 'Hide the steps of this reply'}>
+              {#if working}<LoaderCircle size={12} class="animate-spin text-accent" /> Working · step {work.length}
+              {:else}<ListTree size={12} /> {work.length} {work.length === 1 ? 'step' : 'steps'}{#if work.some((s) => s.ms !== undefined)} · {duration(work.reduce((n, s) => n + (s.ms ?? 0), 0))}{/if}{/if}
+              <ChevronRight size={12} class="transition-transform {hide ? '' : 'rotate-90'}" />
+            </button>
+          {/if}
+          {#each blocks(m.parts, hide ? (p, at) => processPart(p, at, end) : undefined) as b}
             {#if b.kind === 'part'}
             {@const p = b.p}
             {#if p.kind === 'text'}
@@ -336,7 +386,7 @@
                 <ol>
                   {#each b.steps as { p, at }, si}
                     {@const key = stepKey(mi, at)}
-                    {@const open = isOpen(m.parts, p, key, at)}
+                    {@const open = isOpen(p, key)}
                     {@const waiting = p.status === 'awaiting' && !!chat.pending}
                     {@const risky = waiting && !!p.sql && destructive(p.sql)}
                     {@const failed = p.status === 'blocked' || p.status === 'denied'}
@@ -347,7 +397,6 @@
                         {#if p.status === 'running'}<LoaderCircle size={13} class="shrink-0 animate-spin text-accent" />
                         {:else if failed}<Ban size={13} class="shrink-0 text-red-600 dark:text-red-400" />
                         {:else if p.status === 'awaiting'}<Clock size={13} class="shrink-0 text-amber-600 dark:text-amber-400" />
-                        {:else if p.name === 'describe_table' || p.name === 'list_tables'}<Database size={13} class="shrink-0 text-faint" />
                         {:else if p.name === 'render_chart'}<ChartColumn size={13} class="shrink-0 text-emerald-600 dark:text-emerald-400" />
                         {:else}<Check size={13} class="shrink-0 text-emerald-600 dark:text-emerald-400" />{/if}
                         <span class="shrink-0 font-medium text-ink">{label[p.name] ?? p.name}</span>
@@ -360,7 +409,7 @@
                       {#if open}
                         {@const sqlActions = !!p.sql && p.name !== 'describe_table' && !waiting}
                         {#if p.sql && p.name !== 'describe_table'}
-                          <pre class="overflow-x-auto border-t border-line bg-sunken px-3 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted">{p.sql}</pre>
+                          <pre class="max-h-64 overflow-auto border-t border-line bg-sunken px-3 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-ink">{@html sqlHtml(p.sql, sc?.engine)}</pre>
                         {/if}
                         {#if p.rows?.length}
                           {@const cols = Object.keys(p.rows[0])}
@@ -540,16 +589,31 @@
         </div>
         <button class="fixed inset-0 z-40 cursor-default" aria-label="Close" onclick={() => (writeMenu = false)}></button>
       {/if}
-      <span class="min-w-0 flex-1 truncate text-right text-[11px] text-faint" aria-hidden="true">↵ send · ⇧↵ new line{messages.length ? ' · ↑ last question' : ''}</span>
+      <ModelPicker variant="chip" />
+      <button class="btn btn-ghost ml-auto size-6 shrink-0 p-0 {keysMenu ? 'bg-hover text-ink' : ''}" onclick={() => (keysMenu = !keysMenu)} aria-expanded={keysMenu} title="Keyboard shortcuts" aria-label="Keyboard shortcuts"><Info size={13} /></button>
+      {#if keysMenu}
+        <div class="popover absolute right-0 bottom-full z-50 mb-1 w-56 p-2 text-[12px]">
+          <div class="label pb-1.5">Keyboard shortcuts</div>
+          {#each [['↵', 'Send'], ['⇧↵', 'New line'], ['↑', 'Last question (empty box)'], ['⇧⌘H', 'Show or hide steps']] as [k, t] (k)}
+            <div class="flex h-6 items-center gap-2">
+              <span class="min-w-0 flex-1 truncate text-muted">{t}</span>
+              <kbd class="shrink-0 rounded border border-line px-1 font-mono text-[11px] text-ink">{k}</kbd>
+            </div>
+          {/each}
+        </div>
+        <button class="fixed inset-0 z-40 cursor-default" aria-label="Close" onclick={() => (keysMenu = false)}></button>
+      {/if}
       {#if chat.live && chat.cancel && !chat.question}
-        <button class="btn btn-primary ml-auto size-7 rounded-lg p-0" onclick={() => chat.cancel?.()} aria-label="Stop" title="Stop the reply">
+        <button class="btn btn-primary size-7 rounded-lg p-0" onclick={() => chat.cancel?.()} aria-label="Stop" title="Stop the reply">
           <Square size={11} class="fill-current" />
         </button>
       {:else}
-        <button class="btn btn-primary ml-auto size-7 rounded-lg p-0" onclick={() => submit()} disabled={chat.question ? !input.trim() : !!chat.live || !input.trim() || !ready} aria-label={chat.question ? 'Send answer' : 'Send'}>
+        <button class="btn btn-primary size-7 rounded-lg p-0" onclick={() => submit()} disabled={chat.question ? !input.trim() : !!chat.live || !input.trim() || !ready} aria-label={chat.question ? 'Send answer' : 'Send'}>
           <ArrowUp size={15} />
         </button>
       {/if}
     </div>
   </div>
 </section>
+
+<svelte:window onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'h') { e.preventDefault(); toggleSteps(); } }} />

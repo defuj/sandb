@@ -505,7 +505,7 @@
 
   function sortResult(t: Tab, sort: ResultSort) {
     const r = t.result;
-    if (!r?.sql || !r.isRead || r.summary || running[t.id] || !confirmDiscard()) return;
+    if (!r?.sql || !r.sortable || r.summary || running[t.id] || !confirmDiscard()) return;
     t.sort = sort;
     run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort });
   }
@@ -695,10 +695,10 @@
     return nt;
   }
 
-  /** Into the active editor when it is on the step's database, else into a new tab there. */
+  /** Appended to the active editor when it is on the step's database, else into a new tab there. */
   function chatInsert(sql: string, src?: ChatSource) {
     const same = !src || !connOf(src) || (tab.connId === src.connId && tab.database === dbOf(src));
-    if (!tab.table && same) tab.query = sql;
+    if (!tab.table && same) tab.query = tab.query.trim() ? `${tab.query.trimEnd()}\n\n${sql}` : sql;
     else chatTab(sql, src);
   }
 

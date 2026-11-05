@@ -30,7 +30,7 @@ Current gate results (2026-11-04, after phase 4 review fixes):
 Phase 4 notes:
 - Code: `src-tauri/src/core/ai/` (`settings.rs`, `client.rs`, `tools.rs`, `prompt.rs`, `session.rs`). Commands: `get_ai_settings`, `save_ai_settings`, `set_ai_key`, `test_ai`, `list_ai_models`, `chat_send`, `chat_cancel` (Tauri and bridge; the bridge streams `chat_send` as SSE).
 - `test_ai` calls `GET /models` and fails with `model_not_found` if the model is not in the list (`name:latest` also matches, for Ollama).
-- `list_ai_models` calls `GET /models` for the given (maybe unsaved) settings and key, and returns the ids sorted, without duplicates. The UI model picker (`ModelPicker.svelte`, in Settings and in the chat header) uses it. The model is one setting for all chats.
+- `list_ai_models` calls `GET /models` for the given (maybe unsaved) settings and key, and returns the ids sorted, without duplicates. The UI model picker (`ModelPicker.svelte`, in Settings and below the chat message box) uses it. The model is one setting for all chats.
 - `propose_write` never runs SQL. It refuses with `write_blocked` when the chat's write mode is off or the connection is read-only. Else it sends `write_preview`. `allowWrites` comes from the chat panel toggle, which is UI-only. `approve_write` (phase 5) must check the saved connection again.
 - Privacy `schema`: the model gets column names, the row count and the truncated flag. Database error text is replaced by the SQLSTATE or error number.
 - Stop drops the running AI read. The database query stops at its own time limit.

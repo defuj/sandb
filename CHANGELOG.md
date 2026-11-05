@@ -4,6 +4,21 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-05
+
+- The model menu of the assistant moved from the header to the bottom of the message box, next to "Read-only". The menu opens upward.
+- The keyboard shortcuts of the assistant are in a list now. Click the "i" button next to the send button to show the list.
+- "Put the SQL in the editor" in the assistant now adds the SQL at the end of the editor. It does not replace your query. A blank line separates the two.
+- A code block in an assistant reply has a copy button. Move the pointer over the block to show it.
+- SQL code blocks in an assistant reply have colors, as in the editor. The block language (`sql`, `postgresql`, `mysql`, `sqlite`) sets the SQL dialect. A block without a language gets colors when it starts with a SQL statement, for example `SELECT` or `WITH`. Blocks in other languages show without colors.
+- The assistant can show only the results of a reply. Click the list button in the assistant header, or press ⇧⌘H. Each reply then shows one line with the number of steps, followed by the answer, charts and errors. The steps and the text before the last data step do not show. Click the steps line to open the steps of that reply. A write that waits for your approval and a question that waits for your answer always show. sandb keeps this setting after a restart.
+- The SQL in assistant steps has the same colors as the editor. A long statement scrolls in its box.
+- Each finished step shows a green check mark. Before, finished "Describe table" and "List tables" steps showed a gray database icon, so they looked unfinished.
+- A line now separates the assistant header from the messages.
+- A click on a column header of an `EXPLAIN` or `SHOW` result does not show the error "Sorting requires a SELECT query" now. sandb can sort only a `SELECT` result, so these headers do not sort.
+- To sort a result, click the sort icon in the column header. A click on the column name does not sort now.
+- You can select columns and rows in a result, as in DBeaver, and copy them with ⌘C. Click a column name to select the column. Click a row number to select the row. Hold ⌘ to add or remove one, or hold ⇧ to select a range. When you select rows and columns, ⌘C copies only the cells in the selected rows and columns. sandb copies the values without the header, with tabs between the columns. A click on a cell clears the selection.
+
 ## [0.6.0] - 2026-11-05
 
 - The macOS app also builds for Intel Macs. A release now ships an Apple Silicon build and an Intel build (the Intel disk image is named `sandb_<version>_x64.dmg`). Both update through the same `latest.json`.
@@ -70,7 +85,7 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 - Fixed: on a live connection, the first double-click edit no longer resets the column widths that you set.
 - Fixed: an assistant read now shows all the rows that the backend sends (up to 50), not only the first 10. The table scrolls and its header stays visible.
 - The assistant now looks at the schema first. Before it queries a table, it calls `describe_table` for that table, and it calls `list_tables` when it does not know the table.
-- Assistant tool steps show as a numbered timeline with a status and a duration for each step. A step closes when it finishes. Click a step to open it. Running, waiting and failed steps stay open, and so does the last result.
+- Assistant tool steps show as a numbered timeline with a status and a duration for each step. Steps stay closed. Click a step to open it. Only steps that wait for your approval and failed steps open automatically.
 - Each step has "Call details": the tool name, the call id, the JSON arguments, the result, the duration and the error code.
 - Read steps have actions: copy the SQL, put it in the editor, open it in the results grid in a new tab, run it again, and copy the rows as CSV.
 - Assistant result tables align numbers to the right and show NULL as the grid does. Click a cell to see its full value. A note tells you when more rows exist.

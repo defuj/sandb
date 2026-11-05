@@ -67,7 +67,7 @@
   });
 
   function sortBy(c: string) {
-    if (!result?.isRead || result.summary || loading) return;
+    if (!result?.sortable || result.summary || loading) return;
     onsort?.({ column: c, columnIndex: result.columns.indexOf(c), ascending: sort?.column === c ? !sort.ascending : true });
   }
 
@@ -160,6 +160,8 @@
     const r = result;
     untrack(() => {
       selected = {};
+      pickedCols = {};
+      rowAnchor = colAnchor = -1;
       editing = null;
       menu = null;
       columnWidths = [];
@@ -276,12 +278,57 @@
     el.select();
   }
 
-  function pickRow(r: GridRow, e: MouseEvent) {
-    if (!edits.on) return;
-    if (e.metaKey || e.ctrlKey || e.shiftKey) {
-      if (selected[r.key]) delete selected[r.key];
-      else selected[r.key] = true;
-    } else selected = { [r.key]: true };
+  // Row-number clicks select rows and header clicks select columns, like DBeaver: plain click picks one,
+  // ⌘/Ctrl adds or removes one, Shift extends from the last plain or ⌘ click. ⌘C copies the block.
+  let pickedCols = $state<Record<string, true>>({});
+  let rowAnchor = -1;
+  let colAnchor = -1;
+
+  function pick<T>(cur: Record<string, true>, items: T[], i: number, anchor: number, e: MouseEvent, key: (x: T) => string) {
+    if (e.shiftKey && anchor >= 0) {
+      const out: Record<string, true> = e.metaKey || e.ctrlKey ? { ...cur } : {};
+      for (let k = Math.min(anchor, i); k <= Math.max(anchor, i); k++) out[key(items[k])] = true;
+      return out;
+    }
+    if (!(e.metaKey || e.ctrlKey)) return { [key(items[i])]: true } as Record<string, true>;
+    const out = { ...cur };
+    if (out[key(items[i])]) delete out[key(items[i])];
+    else out[key(items[i])] = true;
+    return out;
+  }
+
+  function pickRow(i: number, e: MouseEvent) {
+    selected = pick(selected, rows, i, rowAnchor, e, (r) => r.key);
+    if (!e.shiftKey) rowAnchor = i;
+    if (!e.shiftKey && !e.metaKey && !e.ctrlKey) pickedCols = {};
+    scroller?.focus({ preventScroll: true });
+  }
+
+  function pickColumn(ci: number, e: MouseEvent) {
+    if (!result) return;
+    pickedCols = pick(pickedCols, result.columns, ci, colAnchor, e, (c) => c);
+    if (!e.shiftKey) colAnchor = ci;
+    if (!e.shiftKey && !e.metaKey && !e.ctrlKey) selected = {};
+    scroller?.focus({ preventScroll: true });
+  }
+
+  const hasRows = $derived(Object.keys(selected).length > 0);
+  const hasCols = $derived(Object.keys(pickedCols).length > 0);
+  /** The copied block: picked rows (all if none) × picked columns (all if none). */
+  const inBlock = (r: GridRow, c: string) => (hasRows || hasCols) && (!hasRows || !!selected[r.key]) && (!hasCols || !!pickedCols[c]);
+
+  function copyBlock(e: KeyboardEvent) {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key.toLowerCase() !== 'c' || editing || !result || !(hasRows || hasCols)) return;
+    e.preventDefault();
+    const cols = result.columns.filter((c) => !hasCols || pickedCols[c]);
+    const text = rows
+      .filter((r) => !hasRows || selected[r.key])
+      .map((r) => cols.map((c) => {
+        const v = value(r, c);
+        return v == null ? '' : typeof v === 'object' ? (isBytes(v) ? v.$bytes : JSON.stringify(v)) : String(v);
+      }).join('\t'))
+      .join('\n');
+    navigator.clipboard?.writeText(text).catch(() => {});
   }
 
   function deleteRows(keys: string[]) {
@@ -327,7 +374,7 @@
     if (edits.error?.key === r.key) return 'bg-red-500/15 outline outline-1 -outline-offset-1 outline-red-500/60';
     if (isDeleted(r)) return 'bg-red-500/8 text-faint line-through decoration-red-500/60 dark:bg-red-500/10';
     if (r.isNew) return 'bg-emerald-500/8 dark:bg-emerald-500/10';
-    if (selected[r.key]) return 'bg-accent/10';
+    if (selected[r.key] && !hasCols) return 'bg-accent/10';
     return 'hover:bg-hover';
   }
 </script>
@@ -368,7 +415,8 @@
   <div class="flex h-full flex-col">
     {#if result.notices}<div class="border-b border-line px-3 py-1.5">{@render notices(result.notices)}</div>{/if}
     {#if result.summary}<div class="border-b border-line px-3 py-1.5">{@render summary(result.summary)}</div>{/if}
-    <div class="min-h-0 flex-1 overflow-auto" bind:this={scroller} onscroll={loadIfAtEnd}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="min-h-0 flex-1 overflow-auto outline-none" tabindex="-1" bind:this={scroller} onscroll={loadIfAtEnd} onkeydown={copyBlock}>
       <table class="w-full border-separate border-spacing-0 font-mono text-[12px] {tableWidth === null ? '' : 'table-fixed'}" style:width={tableWidth === null ? undefined : `${tableWidth}px`}>
         <colgroup>
           <col class="w-9" />
@@ -381,15 +429,25 @@
             <th class="w-9 border-b border-line bg-surface px-2 py-0 text-right font-sans text-[10.5px] font-normal text-faint"></th>
             {#each result.columns as c, ci}
               <th class="group/th relative h-8 border-b border-l border-line bg-surface px-2.5 py-0 text-left font-normal" title={result.types?.[ci]}>
-                <button class="flex w-full items-baseline gap-1.5 text-left whitespace-nowrap" onclick={() => sortBy(c)}>
-                  <span class="font-sans text-[12px] font-semibold {sort?.column === c ? 'text-accent' : 'text-ink'}">{c}</span>
-                  {#if result.types?.[ci]}<span class="max-w-72 min-w-0 truncate text-[10.5px] text-faint">{result.types?.[ci]}</span>{/if}
-                  <span class="ml-auto self-center">
-                    {#if sort?.column === c}
-                      {#if sort?.ascending}<ArrowUp size={12} class="text-accent" />{:else}<ArrowDown size={12} class="text-accent" />{/if}
-                    {:else}<ArrowUpDown size={12} class="text-faint opacity-0 transition-opacity group-hover/th:opacity-100" />{/if}
-                  </span>
-                </button>
+                {#if pickedCols[c]}<span class="pointer-events-none absolute inset-0 bg-accent/10"></span>{/if}
+                <div class="relative flex w-full items-center gap-1.5">
+                  <button class="flex min-w-0 flex-1 items-baseline gap-1.5 text-left whitespace-nowrap select-none" title="Select column (⌘ add, ⇧ range)" onclick={(e) => pickColumn(ci, e)}>
+                    <span class="font-sans text-[12px] font-semibold {pickedCols[c] || sort?.column === c ? 'text-accent' : 'text-ink'}">{c}</span>
+                    {#if result.types?.[ci]}<span class="max-w-72 min-w-0 truncate text-[10.5px] text-faint">{result.types?.[ci]}</span>{/if}
+                  </button>
+                  {#if result.sortable}
+                    <button
+                      class="shrink-0 rounded p-0.5 hover:bg-hover {sort?.column === c ? '' : 'opacity-0 transition-opacity group-hover/th:opacity-100 focus-visible:opacity-100'}"
+                      title="Sort by {c}"
+                      aria-label="Sort by {c}"
+                      onclick={() => sortBy(c)}
+                    >
+                      {#if sort?.column === c}
+                        {#if sort?.ascending}<ArrowUp size={12} class="text-accent" />{:else}<ArrowDown size={12} class="text-accent" />{/if}
+                      {:else}<ArrowUpDown size={12} class="text-faint" />{/if}
+                    </button>
+                  {/if}
+                </div>
                 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
                 <div
                   class="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize hover:bg-accent/25 focus-visible:bg-accent/40"
@@ -413,17 +471,21 @@
           {#each rows as r, i (r.key)}
             <tr class="group/row {rowTint(r)}">
               <td
-                class="border-b border-line/60 px-2 text-right text-[10.5px] tabular-nums {selected[r.key] ? 'font-medium text-ink' : 'text-faint'} {edits.on ? 'cursor-pointer' : ''}"
-                onclick={(e) => pickRow(r, e)}
+                class="cursor-pointer border-b border-line/60 px-2 text-right text-[10.5px] tabular-nums select-none {selected[r.key] ? 'font-medium text-ink' : 'text-faint'}"
+                onclick={(e) => pickRow(i, e)}
               >{r.isNew ? '+' : i + 1}</td>
               {#each result.columns as c}
                 {@const v = value(r, c)}
                 {@const isEd = editing?.key === r.key && editing.col === c}
                 {@const fk = linkOf(r, c)}
                 <td
-                  class="relative h-[26px] {tableWidth === null ? 'max-w-72' : ''} truncate border-b border-l border-line/60 {fk ? 'pr-7 pl-2.5' : 'px-2.5'} {isChanged(r, c) && !isDeleted(r) ? 'bg-amber-400/15 dark:bg-amber-400/12' : ''} {typeof v === 'number' ? 'text-right' : ''}"
+                  class="relative h-[26px] {tableWidth === null ? 'max-w-72' : ''} truncate border-b border-l border-line/60 {fk ? 'pr-7 pl-2.5' : 'px-2.5'} {isChanged(r, c) && !isDeleted(r) ? 'bg-amber-400/15 dark:bg-amber-400/12' : hasCols && inBlock(r, c) ? 'bg-accent/10' : ''} {typeof v === 'number' ? 'text-right' : ''}"
                   ondblclick={() => startEdit(r, c)}
-                  onclick={(e) => { if (edits.on && !e.metaKey && !e.ctrlKey) selected = { [r.key]: true }; }}
+                  onclick={(e) => {
+                    if (e.metaKey || e.ctrlKey) return;
+                    pickedCols = {};
+                    selected = edits.on ? { [r.key]: true } : {};
+                  }}
                   oncontextmenu={(e) => openMenu(e, r, c)}
                 >
                   {#if isEd}

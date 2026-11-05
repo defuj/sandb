@@ -70,5 +70,5 @@ export function toResult(run: QueryRun, mock: boolean, limit: number, database: 
   const rows = s.rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] as Cell])));
   // A multi-statement run is never re-run as a whole, so only a single read can page or export.
   const isRead = st.length === 1 && s.isRead;
-  return { ...base, columns, types: s.columns.map((c) => c.dataType), rows, truncated: s.truncated, limit, isRead, table: s.table, sql: s.sql };
+  return { ...base, columns, types: s.columns.map((c) => c.dataType), rows, truncated: s.truncated, limit, isRead, sortable: isRead && s.sortable, table: s.table, sql: s.sql };
 }

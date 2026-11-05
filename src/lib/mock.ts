@@ -24,6 +24,8 @@ export interface QueryResult {
   summary?: string[];
   /** The shown statement is a plain read, so "Load more" and export may run it again. */
   isRead?: boolean;
+  /** The shown statement is a query the backend can add ORDER BY to (not EXPLAIN / SHOW). */
+  sortable?: boolean;
   /** Backend notices, e.g. a rolled-back open transaction. */
   notices?: string[];
   /** From a real database (not the in-memory mock). */

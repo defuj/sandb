@@ -1,22 +1,58 @@
 <script lang="ts">
   import DOMPurify from 'dompurify';
-  import { marked } from 'marked';
+  import { Marked, type Tokens } from 'marked';
+  import { fenceDialect, sqlHtml } from '../highlight';
 
   let { text }: { text: string } = $props();
 
+  // SQL code blocks are colored like the editor. Other languages stay plain.
+  const md = new Marked({
+    gfm: true,
+    breaks: true,
+    renderer: {
+      code({ text: code, lang }: Tokens.Code) {
+        const dialect = fenceDialect(lang, code);
+        return dialect ? `<pre><code class="language-sql">${sqlHtml(code, dialect)}\n</code></pre>\n` : false;
+      },
+    },
+  });
+
   // Model output is untrusted. Keep Markdown formatting, but never its active HTML.
   // Each table gets a scroll box: the table fills the panel width and scrolls when it is wider.
+  // Each code block gets a copy button. It is added after sanitizing, so it is our own markup.
+  const copyIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+  const checkIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
   const html = $derived(
-    DOMPurify.sanitize(marked.parse(text, { async: false, gfm: true, breaks: true }), {
+    DOMPurify.sanitize(md.parse(text, { async: false }), {
       FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'option', 'img'],
       FORBID_ATTR: ['style'],
     })
       .replaceAll('<table>', '<div class="table-box"><table>')
-      .replaceAll('</table>', '</table></div>'),
+      .replaceAll('</table>', '</table></div>')
+      .replaceAll('<pre>', `<div class="code-box"><button type="button" class="code-copy" title="Copy code" aria-label="Copy code">${copyIcon}</button><pre>`)
+      .replaceAll('</pre>', '</pre></div>'),
   );
+
+  /** One listener for all code blocks: copies the block next to the clicked button. */
+  function copyCode(node: HTMLElement) {
+    const onClick = async (ev: MouseEvent) => {
+      const btn = (ev.target as Element).closest<HTMLButtonElement>('.code-copy');
+      const code = btn?.parentElement?.querySelector('pre')?.textContent?.trimEnd();
+      if (!btn || code == null) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.innerHTML = checkIcon;
+        setTimeout(() => (btn.innerHTML = copyIcon), 1200);
+      } catch (e) {
+        console.warn('Copy failed.', e);
+      }
+    };
+    node.addEventListener('click', onClick);
+    return { destroy: () => node.removeEventListener('click', onClick) };
+  }
 </script>
 
-<div class="chat-markdown">{@html html}</div>
+<div class="chat-markdown" use:copyCode>{@html html}</div>
 
 <style>
   .chat-markdown {
@@ -62,6 +98,25 @@
     padding: 10px 12px;
   }
   .chat-markdown :global(pre) :global(code) { background: transparent; padding: 0; font-size: 11.5px; line-height: 1.6; }
+  .chat-markdown :global(.code-box) { position: relative; margin: 0 0 10px; }
+  .chat-markdown :global(.code-box) > :global(pre) { margin: 0; }
+  .chat-markdown :global(.code-copy) {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    background: var(--c-sunken);
+    color: var(--c-faint);
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .chat-markdown :global(.code-box:hover .code-copy),
+  .chat-markdown :global(.code-copy:focus-visible) { opacity: 1; }
+  .chat-markdown :global(.code-copy:hover) { background: var(--c-hover); color: var(--c-ink); }
   .chat-markdown :global(blockquote) {
     margin: 0 0 10px;
     border-left: 2px solid var(--c-line);

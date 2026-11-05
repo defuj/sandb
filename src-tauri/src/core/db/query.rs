@@ -92,6 +92,9 @@ pub struct StatementResult {
     pub affected: Option<u64>,
     /// A plain read (`facts::is_plain_read`): "Load more" and export may run it again.
     pub is_read: bool,
+    /// The lone plain read of the run is a query (`SELECT`, `WITH`, `VALUES`), so a header click
+    /// may add ORDER BY to it. EXPLAIN and SHOW are reads that cannot be sorted.
+    pub sortable: bool,
     pub elapsed_ms: u64,
 }
 
@@ -536,6 +539,7 @@ where
             rows: set.rows,
             truncated: set.truncated,
             is_read: read,
+            sortable: false,
             elapsed_ms,
         });
     }
@@ -831,6 +835,31 @@ fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
+/// A lone plain read that parses as one query: the only shape [`sorted_statements`] accepts.
+fn is_sortable(engine: Engine, stmts: &[String], reads: &[bool]) -> bool {
+    let ([sql], [true]) = (stmts, reads) else {
+        return false;
+    };
+    matches!(
+        Parser::parse_sql(&*split::dialect(engine), sql).as_deref(),
+        Ok([Statement::Query(_)])
+    )
+}
+
+/// Flags the single result of a sortable run, so the grid offers sorting only where it works.
+fn mark_sortable(
+    engine: Engine,
+    stmts: &[String],
+    reads: &[bool],
+    results: &mut [StatementResult],
+) {
+    if let [r] = results
+        && is_sortable(engine, stmts, reads)
+    {
+        r.sortable = true;
+    }
+}
+
 /// Builds the execution text separately from the editor text: sorting changes only what is sent
 /// to the server, never the SQL retained in `StatementResult` for source reruns and editing.
 fn sorted_statements(
@@ -965,7 +994,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
     }
     let pool = connections::pool_for(state, &conn.id, Some(&database))?;
     let mut in_tx: Option<bool> = None;
-    let outcome = match pool {
+    let mut outcome = match pool {
         DbPool::Pg(p) => {
             let mut c = p.acquire().await?;
             let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -1051,6 +1080,7 @@ async fn run_inner(state: &AppState, req: RunRequest, check: bool) -> Result<Que
             r
         }
     }?;
+    mark_sortable(conn.engine, &stmts, &reads, &mut outcome.results);
     // MySQL's KILL QUERY can end SLEEP() normally instead of with an error.
     if conn.engine == Engine::Mysql && cancelled.load(Ordering::SeqCst) {
         return Err(cancelled_error());
@@ -1194,8 +1224,11 @@ async fn run_in_session(
     };
     session::refresh(&mut s).await;
     let r = match r {
-        Ok(statements) => Ok(QueryRun {
-            statements,
+        Ok(mut statements) => Ok(QueryRun {
+            statements: {
+                mark_sortable(conn.engine, stmts, reads, &mut statements);
+                statements
+            },
             notices,
             elapsed_ms: started.elapsed().as_millis() as u64,
         }),
@@ -1467,6 +1500,25 @@ mod tests {
         );
     }
 
+    /// EXPLAIN and SHOW are plain reads (they page and export) but have no ORDER BY to add;
+    /// offering a header sort on them only produced "Sorting requires a SELECT query".
+    #[test]
+    fn only_lone_queries_are_sortable() {
+        let read =
+            |e, sql: &str| is_sortable(e, &[sql.into()], &[facts::is_plain_read_sql(e, sql)]);
+        assert!(read(Engine::Pg, "SELECT * FROM t"));
+        assert!(read(Engine::Pg, "WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(!read(Engine::Pg, "EXPLAIN SELECT * FROM t"));
+        assert!(!read(Engine::Pg, "SHOW search_path"));
+        assert!(!read(Engine::Mysql, "EXPLAIN SELECT * FROM t"));
+        assert!(!read(Engine::Pg, "DELETE FROM t"));
+        assert!(!is_sortable(
+            Engine::Pg,
+            &["SELECT 1".into(), "SELECT 2".into()],
+            &[true, true]
+        ));
+    }
+
     #[test]
     fn run_request_deserializes_optional_sort() {
         let request: RunRequest = serde_json::from_value(serde_json::json!({
@@ -1496,6 +1548,7 @@ mod tests {
                 truncated: false,
                 affected: None,
                 is_read: true,
+                sortable: true,
                 elapsed_ms: 3,
             }],
             notices: vec![],
@@ -1505,7 +1558,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"statements": [{"sql": "SELECT 1", "columns": [{"name": "a", "dataType": "INT4"}],
-                "rows": [[1]], "rowCount": 1, "truncated": false, "isRead": true, "elapsedMs": 3}], "elapsedMs": 4})
+                "rows": [[1]], "rowCount": 1, "truncated": false, "isRead": true, "sortable": true, "elapsedMs": 3}], "elapsedMs": 4})
         );
     }
 }
