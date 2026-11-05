@@ -4,6 +4,16 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
+- Releases now have a fixed code signature. After you update, macOS does not ask for your password again for each saved connection password. You must click "Always Allow" one more time after you install the first version with this change.
+- Settings has tabs now: AI, Safeguards, Appearance and Updates. The "Update" button in the title bar opens the Updates tab. The model name in the assistant opens the AI tab.
+- Appearance: you can show an image behind the app. Click Settings > Appearance > Background > Image, then choose a file. sandb makes the image smaller and keeps it on this computer.
+- Appearance: the desktop app can make its window see-through. Click Background > See-through. Optionally, macOS blurs the desktop behind the window.
+- With a background, sliders set the transparency. "Tint" sets the canvas color over the background. "Panel opacity" sets the opacity of the editor, results and assistant panels. Below 100%, the panels become frosted glass. With an image, "Panel blur" sets the blur of the glass and "Image blur" sets the blur of the image, both from 0% to 100%.
+- The theme now stays after a restart.
+- Fixed: when you asked for a chart, the assistant sometimes did not make one. It wrote "the chart is above", but the chat showed no chart. Now the prompt tells the assistant to call `render_chart` each time that you ask for a chart, graph or plot. It must not say that a chart or query result exists if its tool call did not succeed.
+
 ## [0.4.2] - 2026-11-05
 
 - Fixed: autocomplete after `table.` or `alias.` showed no columns for some tables. On a large database, the schema snapshot keeps only the first 2000 columns, so later tables had no columns. Now the editor gets the columns of such a table from the database when you need them. This also applies to a PostgreSQL table outside `public` when you write it without its schema and its name is unique.

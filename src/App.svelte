@@ -2,7 +2,8 @@
   import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, PanelLeft, CircleArrowUp, PanelBottom } from '@lucide/svelte';
   import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste, ChevronUp, ChevronDown, Table2, Eye, ScanEye, RotateCw, Save, CopyPlus } from '@lucide/svelte';
   import { tick, untrack } from 'svelte';
-  import { ui, db, toggleTheme, active, type Conn } from './lib/state.svelte';
+  import { ui, db, active, type Conn } from './lib/state.svelte';
+  import { look, backdropOn, toggleTheme } from './lib/appearance.svelte';
   import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
   import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
   import { schemas, runMock, statementKind, nsOf, type QueryResult, type Row, type Schema } from './lib/mock';
@@ -760,6 +761,13 @@
     notify(true, `${d.action === 'drop' ? 'Dropped' : 'Truncated'} ${displayName(d.t)}`);
   }</script>
 
+<!-- Behind everything: the picked image, or nothing (see-through window). The ::after layer tints it with the canvas color. -->
+{#if backdropOn()}
+  <div class="app-backdrop" aria-hidden="true">
+    {#if look.backdrop === 'image'}<div class="app-backdrop-image" style:background-image="url({JSON.stringify(look.image)})"></div>{/if}
+  </div>
+{/if}
+
 <div class="flex h-full flex-col">
   <!-- Title bar. data-tauri-drag-region acts on the element itself only, so the empty strips drag the window and the buttons stay clickable. -->
   <div class="flex h-10 shrink-0 items-center px-2 select-none" data-tauri-drag-region>
@@ -798,7 +806,7 @@
     {/if}
     <div class="h-full min-w-6 flex-1" data-tauri-drag-region></div>
     {#if updates.status === 'available' || updates.status === 'restart'}
-      <button class="mr-1 flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-amber-600 hover:bg-hover dark:text-amber-400" title="sandb v{updates.next} is available" onclick={() => (ui.page = 'settings')}><CircleArrowUp size={14} /> Update</button>
+      <button class="mr-1 flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-amber-600 hover:bg-hover dark:text-amber-400" title="sandb v{updates.next} is available" onclick={() => { ui.settingsSection = 'updates'; ui.page = 'settings'; }}><CircleArrowUp size={14} /> Update</button>
     {/if}
     <button class="btn btn-ghost size-7 p-0 {ui.chatOpen ? 'bg-hover text-ink' : ''}" onclick={() => (ui.chatOpen = !ui.chatOpen)} title="Toggle AI chat" aria-label="Toggle AI chat"><PanelRight size={15} /></button>
   </div>
@@ -842,7 +850,7 @@
   <div class="-mx-2 w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuenow={ui.sidebarWidth} aria-valuemin={160} aria-valuemax={480} tabindex="0" hidden={!ui.sidebarOpen} onpointerdown={resizeSidebar} onkeydown={keySidebar}></div>
 
   <!-- Main -->
-  <main bind:this={mainEl} class="card flex min-w-[300px] flex-1 flex-col overflow-hidden">
+  <main bind:this={mainEl} class="card relative flex min-w-[300px] flex-1 flex-col overflow-hidden">
     {#if ui.page === 'settings'}
       <SettingsPage onEnableWrites={(c) => (guardTarget = c)} />
     {:else if ui.page === 'audit'}

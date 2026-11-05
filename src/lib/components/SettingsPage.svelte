@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { ArrowLeft, Bot, KeyRound, Eye, EyeOff, Lock, Gauge, ShieldCheck, Palette, Sun, Moon, Monitor, Check, LoaderCircle, X, CircleArrowUp } from '@lucide/svelte';
-  import { ui, ai, db, providers, setTheme, engines, envTag, canWrite, aiSettings, saveAiSoon, saveAiKeySoon, flushAi, removeAiKey, type Provider, type Conn } from '../state.svelte';
+  import { ArrowLeft, Bot, KeyRound, Eye, EyeOff, Lock, Gauge, ShieldCheck, Palette, Sun, Moon, Monitor, Check, LoaderCircle, X, CircleArrowUp, Image, AppWindow, Square, SlidersHorizontal } from '@lucide/svelte';
+  import { ui, ai, db, providers, engines, envTag, canWrite, aiSettings, saveAiSoon, saveAiKeySoon, flushAi, removeAiKey, type Provider, type Conn } from '../state.svelte';
+  import { look, canSeeThrough, backdropOn, lookChanged, setTheme, setBackgroundImage, removeBackgroundImage, resetBackdrop, type Backdrop } from '../appearance.svelte';
   import { api, ApiError } from '../api';
   import { appVersion, updates, checkForUpdates, installUpdate, restartApp, updatesEnabled as canUpdate } from '../updates.svelte';
 
@@ -67,17 +68,75 @@
     if (c.aiWrite) c.aiWrite = false;
     else if (canWrite(c)) onEnableWrites(c);
   }
+
+  const sections = [
+    { id: 'ai', l: 'AI', i: Bot },
+    { id: 'safeguards', l: 'Safeguards', i: ShieldCheck },
+    { id: 'appearance', l: 'Appearance', i: Palette },
+    { id: 'updates', l: 'Updates', i: CircleArrowUp },
+  ] as const;
+
+  const backdrops = [
+    { id: 'none', l: 'None', i: Square },
+    { id: 'image', l: 'Image', i: Image },
+    ...(canSeeThrough ? [{ id: 'desktop', l: 'See-through', i: AppWindow }] : []),
+  ] as { id: Backdrop; l: string; i: typeof Square }[];
+
+  let imageInput = $state<HTMLInputElement>();
+  let imageBusy = $state(false);
+  let imageError = $state('');
+
+  function pickBackdrop(id: Backdrop) {
+    look.backdrop = id;
+    lookChanged();
+    // With no image yet, "Image" goes straight to the file picker.
+    if (id === 'image' && !look.image) imageInput?.click();
+  }
+
+  async function imagePicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    imageBusy = true;
+    imageError = '';
+    try {
+      await setBackgroundImage(file);
+    } catch (err) {
+      imageError = err instanceof Error ? err.message : String(err);
+    } finally {
+      imageBusy = false;
+    }
+  }
 </script>
 
+{#snippet slider(label: string, key: 'tint' | 'panels' | 'imageBlur' | 'panelBlur', min: number, max: number, unit: string, hint: string)}
+  <label class="block">
+    <span class="label mb-1 flex items-center">{label}<span class="ml-auto font-mono text-[11.5px] text-faint tabular-nums">{look[key]}{unit}</span></span>
+    <input class="h-5 w-full cursor-pointer accent-accent" type="range" {min} {max} bind:value={look[key]} oninput={lookChanged} />
+    <span class="mt-0.5 block text-[12px] text-faint">{hint}</span>
+  </label>
+{/snippet}
+
 <div class="flex h-full flex-col">
-  <header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-4">
+  <header class="flex h-12 shrink-0 items-center gap-2.5 px-4">
     <button class="btn btn-ghost -ml-1.5 size-7 p-0" onclick={() => (ui.page = 'query')} aria-label="Back to query"><ArrowLeft size={15} /></button>
     <h1 class="text-[14px] font-semibold">Settings</h1>
     <span class="truncate text-[12.5px] text-faint">AI provider, privacy, safeguards and appearance</span>
   </header>
 
+  <nav class="flex shrink-0 items-end gap-1 overflow-x-auto border-b border-line px-4" aria-label="Settings sections">
+    {#each sections as s (s.id)}
+      <button
+        class="-mb-px flex h-9 shrink-0 items-center gap-1.5 border-b-2 px-2 text-[12.5px] font-medium transition-colors {ui.settingsSection === s.id ? 'border-accent text-ink' : 'border-transparent text-muted hover:text-ink'}"
+        aria-current={ui.settingsSection === s.id ? 'page' : undefined}
+        onclick={() => (ui.settingsSection = s.id)}><s.i size={13} /> {s.l}</button>
+    {/each}
+  </nav>
+
   <div class="flex-1 overflow-auto">
     <div class="mx-auto max-w-[44rem] divide-y divide-line px-6 py-2">
+      {#if ui.settingsSection === 'ai'}
       <!-- AI provider -->
       <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
         <div>
@@ -163,6 +222,7 @@
         </div>
       </section>
 
+      {:else if ui.settingsSection === 'safeguards'}
       <!-- Safeguards -->
       <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
         <div>
@@ -197,11 +257,12 @@
         </div>
       </section>
 
-      <!-- Appearance -->
+      {:else if ui.settingsSection === 'appearance'}
+      <!-- Theme -->
       <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
         <div>
-          <h2 class="flex items-center gap-2 text-[13px] font-semibold"><Palette size={14} class="text-faint" /> Appearance</h2>
-          <p class="mt-1 text-[12.5px] leading-relaxed text-muted">Theme for the whole app.</p>
+          <h2 class="flex items-center gap-2 text-[13px] font-semibold"><Palette size={14} class="text-faint" /> Theme</h2>
+          <p class="mt-1 text-[12.5px] leading-relaxed text-muted">Colors for the whole app.</p>
         </div>
         <div class="min-w-0">
           <div class="seg">
@@ -214,6 +275,71 @@
         </div>
       </section>
 
+      <!-- Background -->
+      <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
+        <div>
+          <h2 class="flex items-center gap-2 text-[13px] font-semibold"><Image size={14} class="text-faint" /> Background</h2>
+          <p class="mt-1 text-[12.5px] leading-relaxed text-muted">
+            Show an image behind the app{#if canSeeThrough}, or make the window see-through{/if}. The image stays on this computer.
+          </p>
+        </div>
+        <div class="min-w-0">
+          <div class="seg">
+            {#each backdrops as b (b.id)}
+              <button class="seg-item flex items-center gap-1.5 {look.backdrop === b.id ? 'seg-on' : ''}" onclick={() => pickBackdrop(b.id)}><b.i size={13} /> {b.l}</button>
+            {/each}
+          </div>
+          <input bind:this={imageInput} class="hidden" type="file" accept="image/*" onchange={imagePicked} />
+
+          {#if look.backdrop === 'image'}
+            <div class="mt-3 flex items-center gap-3">
+              {#if look.image}
+                <div class="h-14 w-24 shrink-0 rounded-md border border-line bg-cover bg-center" style:background-image="url({JSON.stringify(look.image)})" role="img" aria-label="Current background image"></div>
+              {:else}
+                <div class="grid h-14 w-24 shrink-0 place-items-center rounded-md border border-dashed border-line text-faint"><Image size={16} /></div>
+              {/if}
+              <button class="btn btn-secondary" onclick={() => imageInput?.click()} disabled={imageBusy}>
+                {#if imageBusy}<LoaderCircle size={13} class="animate-spin" />{/if} {look.image ? 'Change image…' : 'Choose image…'}
+              </button>
+              {#if look.image}<button class="btn btn-ghost hover:text-red-600 dark:hover:text-red-400" onclick={removeBackgroundImage}>Remove</button>{/if}
+            </div>
+            {#if imageError}<p class="mt-1.5 text-[12px] text-red-700 dark:text-red-400">{imageError}</p>{/if}
+          {:else if look.backdrop === 'desktop'}
+            <div class="mt-3 flex items-center gap-2.5">
+              <button
+                role="switch"
+                aria-checked={look.vibrancy}
+                aria-label="Blur the desktop behind the window"
+                class="relative h-5 w-9 shrink-0 rounded-full transition {look.vibrancy ? 'bg-accent' : 'bg-stone-500'}"
+                onclick={() => { look.vibrancy = !look.vibrancy; lookChanged(); }}>
+                <span class="absolute top-0.5 size-4 rounded-full bg-white shadow transition-all {look.vibrancy ? 'left-[18px]' : 'left-0.5'}"></span>
+              </button>
+              <span class="text-[12.5px]">Blur the desktop behind the window</span>
+            </div>
+          {/if}
+        </div>
+      </section>
+
+      {#if backdropOn()}
+        <!-- Transparency -->
+        <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
+          <div>
+            <h2 class="flex items-center gap-2 text-[13px] font-semibold"><SlidersHorizontal size={14} class="text-faint" /> Transparency</h2>
+            <p class="mt-1 text-[12.5px] leading-relaxed text-muted">How much of the background shows through. Lower values are harder to read.</p>
+          </div>
+          <div class="grid min-w-0 gap-4">
+            {@render slider('Tint', 'tint', 0, 100, '%', 'Canvas color over the background. The sidebar and title bar sit on it.')}
+            {@render slider('Panel opacity', 'panels', 50, 100, '%', 'The editor, results and assistant panels. Below 100% they become frosted glass.')}
+            {#if look.backdrop === 'image'}
+              {@render slider('Panel blur', 'panelBlur', 0, 100, '%', look.panels < 100 ? 'How much the glass panels blur the image behind them.' : 'Set panel opacity below 100% to see this blur.')}
+              {@render slider('Image blur', 'imageBlur', 0, 100, '%', 'Makes the image soft, so text stays clear.')}
+            {/if}
+            <div><button class="btn btn-ghost -ml-2.5" onclick={resetBackdrop}>Reset background</button></div>
+          </div>
+        </section>
+      {/if}
+
+      {:else}
       <!-- Updates -->
       <section class="grid gap-x-10 gap-y-3 py-6 sm:grid-cols-[180px_1fr]">
         <div>
@@ -244,6 +370,7 @@
           {#if updates.error && (updates.status === 'error' || updates.status === 'restart')}<p class="mt-1.5 text-[12px] break-words text-muted">{updates.error}</p>{/if}
         </div>
       </section>
+      {/if}
     </div>
   </div>
 </div>

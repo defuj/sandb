@@ -40,6 +40,8 @@ export const ui = $state({
   /** Assistant panel width in px. */
   chatWidth: 340,
   page: 'query' as 'query' | 'settings' | 'audit',
+  /** The Settings tab that shows. */
+  settingsSection: 'ai' as 'ai' | 'safeguards' | 'appearance' | 'updates',
   theme: 'light' as 'light' | 'dark' | 'system',
   /** Sidebar width in px; the title bar uses it too, so the tabs stay in line with the main card. */
   sidebarWidth: 224,
@@ -205,14 +207,4 @@ export function active(): Conn {
 /** False on a read-only connection: no write UI (editor, AI, edit mode) may act on it. */
 export function canWrite(conn: Conn | Connection): boolean {
   return !conn.readOnly;
-}
-
-export function toggleTheme() {
-  setTheme(ui.dark ? 'light' : 'dark');
-}
-
-export function setTheme(t: 'light' | 'dark' | 'system') {
-  ui.theme = t;
-  ui.dark = t === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : t === 'dark';
-  document.documentElement.classList.toggle('dark', ui.dark);
 }

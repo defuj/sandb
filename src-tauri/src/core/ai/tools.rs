@@ -98,7 +98,7 @@ fn base_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "render_chart",
-                "description": "Run one read-only SQL statement and show its result to the user as a chart in the chat. The chart is also in the PDF export of the reply. Shape the data in SQL: one row per point, sorted, already aggregated.",
+                "description": "Run one read-only SQL statement and show its result to the user as a chart in the chat. This is the only way to show a chart: call it every time the user asks for a chart, graph or plot. The chart is also in the PDF export of the reply. Shape the data in SQL: one row per point, sorted, already aggregated.",
                 "parameters": {
                     "type": "object",
                     "properties": {

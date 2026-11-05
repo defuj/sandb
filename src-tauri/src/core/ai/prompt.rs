@@ -127,10 +127,17 @@ pub fn system_prompt(p: &PromptInput<'_>) -> String {
          Markdown table or list, except key figures in a report. Give a short summary instead.\n",
     );
     s.push_str(
-        "- To show data as a chart, call render_chart. Use line or area for a trend over time, \
-         bar to compare categories, pie for shares of one whole (at most about 8 slices), \
-         scatter for two numeric measures. Aggregate and sort in SQL; keep at most about 50 \
-         categories.\n",
+        "- The user sees a chart only when you call render_chart. When the user asks for a \
+         chart, graph, plot or visual, call render_chart in that same reply, even when you \
+         already queried the data; a text answer or a Markdown table is not a chart. Use line \
+         or area for a trend over time, bar to compare categories, pie for shares of one whole \
+         (at most about 8 slices), scatter for two numeric measures. Aggregate and sort in SQL; \
+         keep at most about 50 categories.\n",
+    );
+    s.push_str(
+        "- Never say that a chart or query result exists unless its tool call in this \
+         reply succeeded. Do not say \"the chart is above\" for an earlier or imagined chart. If \
+         render_chart fails, say so and fix the call.\n",
     );
     s.push_str(
         "- When the user asks for a report, write it as one document in your reply: a # title, \

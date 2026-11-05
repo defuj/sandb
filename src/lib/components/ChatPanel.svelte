@@ -227,10 +227,10 @@
   const placeholder = $derived(chat.question ? 'Type your own answer…' : chat.pending ? 'Approve or deny the write above…' : ready ? (many ? 'Ask across these databases…' : 'Ask about your data…') : 'Add a database to ask about…');
 </script>
 
-<section class="card absolute inset-y-2 right-2 z-30 flex max-w-[calc(100%-1rem)] flex-col overflow-hidden shadow-2xl min-[880px]:static min-[880px]:min-w-[280px] min-[880px]:shadow-[var(--card-shadow)]" style:width="{ui.chatWidth}px">
+<section class="card absolute inset-y-2 right-2 z-30 flex max-w-[calc(100%-1rem)] flex-col overflow-hidden shadow-2xl min-[880px]:relative min-[880px]:inset-auto min-[880px]:min-w-[280px] min-[880px]:shadow-[var(--card-shadow)]" style:width="{ui.chatWidth}px">
   <header class="flex h-11 shrink-0 items-center gap-1 pr-2 pl-4">
     <span class="mr-1 text-[13px] font-semibold">{showHistory ? 'Chats' : 'Assistant'}</span>
-    <button class="ml-auto max-w-40 truncate rounded-md px-1.5 py-0.5 font-mono text-[11px] text-faint hover:bg-hover hover:text-ink" title="Change model in Settings" onclick={() => (ui.page = 'settings')}>{ai.model || 'no model'}</button>
+    <button class="ml-auto max-w-40 truncate rounded-md px-1.5 py-0.5 font-mono text-[11px] text-faint hover:bg-hover hover:text-ink" title="Change model in Settings" onclick={() => { ui.settingsSection = 'ai'; ui.page = 'settings'; }}>{ai.model || 'no model'}</button>
     <button class="btn btn-ghost size-7 p-0 {showHistory ? 'bg-hover text-ink' : ''}" onclick={() => (showHistory = !showHistory)} disabled={!!chat.live} aria-pressed={showHistory} title={chat.live ? 'Wait for the reply to finish' : 'Chat history'} aria-label="Chat history"><History size={14} /></button>
     <button class="btn btn-ghost size-7 p-0" onclick={newChat} disabled={!!chat.live || (!session && !showHistory)} title="New chat" aria-label="New chat"><SquarePen size={14} /></button>
     <button class="btn btn-ghost size-7 p-0" onclick={() => (ui.chatOpen = false)} aria-label="Close assistant"><X size={14} /></button>

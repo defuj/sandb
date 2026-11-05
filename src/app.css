@@ -42,6 +42,11 @@
   --c-syn-number: #b2401a;
   --c-syn-type: #7b4f98;
   --card-shadow: 0 2px 4px -2px rgba(28, 27, 25, 0.1);
+  /* Set by appearance.svelte.ts. Defaults keep the app opaque. */
+  --backdrop-tint: 1;
+  --backdrop-blur: 0px;
+  --panel-blur: 24px;
+  --panel-alpha: 1;
 }
 .dark {
   --c-canvas: #121110;
@@ -66,6 +71,22 @@
 
 html, body, #app { height: 100%; }
 body { @apply bg-canvas text-ink font-sans antialiased text-[13px]; font-feature-settings: 'cv11', 'ss01'; }
+
+/* Backdrop: the body goes clear and `.app-backdrop` shows the image (or the desktop) under a canvas-colored tint. */
+html.backdrop body { background-color: transparent; }
+.app-backdrop { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.app-backdrop::after { content: ''; position: absolute; inset: 0; background-color: color-mix(in srgb, var(--c-canvas) calc(var(--backdrop-tint) * 100%), transparent); }
+/* The negative inset hides the soft edge the blur makes. */
+.app-backdrop-image { position: absolute; inset: calc(var(--backdrop-blur) * -2); background: center / cover no-repeat; filter: blur(var(--backdrop-blur)); }
+/* The blur sits on a layer behind the panel, not on the panel itself. On the panel, backdrop-filter would trap fixed
+   descendants (menus, dialog backdrops) inside it and stop the sticky headers from blurring. Panels need `relative`. */
+html.glass .card { box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-ink) 9%, transparent); }
+html.glass .card::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.4); backdrop-filter: blur(var(--panel-blur)) saturate(1.4); }
+/* Glass: flat parts of a panel (tabs, chips, code blocks) take a light tint instead of the opaque surface,
+   so they do not show as solid bars. Dialogs, menus and sticky headers keep the opaque surface: through a tint,
+   the rows that scroll under a sticky header show through it. */
+html.glass .card .bg-surface:not(:where(.dialog, .popover, thead.sticky) *, thead.sticky) { background-color: color-mix(in srgb, var(--c-surface) 45%, transparent); }
+html.glass .card .bg-sunken:not(:where(.dialog, .popover, thead.sticky) *, thead.sticky) { background-color: color-mix(in srgb, var(--c-sunken) 40%, transparent); }
 ::selection { background: color-mix(in srgb, var(--c-accent) 28%, transparent); }
 
 * { scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
@@ -94,8 +115,10 @@ body { @apply bg-canvas text-ink font-sans antialiased text-[13px]; font-feature
 @utility nav-item-active {
   @apply bg-active text-ink font-medium hover:bg-active;
 }
+/* Panels let the backdrop through by `--panel-alpha`. Popovers, dialogs and sticky headers keep the opaque surface. */
 @utility card {
-  @apply bg-surface rounded-[10px] shadow-[var(--card-shadow)];
+  @apply rounded-[10px] shadow-[var(--card-shadow)];
+  background-color: color-mix(in srgb, var(--c-surface) calc(var(--panel-alpha) * 100%), transparent);
 }
 /* Active title-bar tab: a small piece of the card surface on the canvas. Dark mode needs the edge, as surface and canvas are close. */
 @utility tab-on {
