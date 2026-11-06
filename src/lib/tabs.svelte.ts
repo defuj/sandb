@@ -26,6 +26,10 @@ export interface Tab {
   view: 'data' | 'properties';
   /** The saved query this tab edits; ⌘S writes to it. */
   savedId: string | null;
+  /** `ai`: the tab was opened by the assistant; it may be reused for a later answer. */
+  origin: 'user' | 'ai';
+  /** The full SQL the editor is typing out for an AI answer; null when it is not typing. */
+  aiTyping: string | null;
 }
 
 // state.svelte.ts imports this module too; neither touches the other at load time, so the cycle is safe.
@@ -63,6 +67,8 @@ export function newTab(query = ''): Tab {
     filters: [],
     view: 'data',
     savedId: null,
+    origin: 'user',
+    aiTyping: null,
   });
   // The pushed proxy, so callers mutate the stored tab.
   const t = tabs.list[tabs.list.length - 1];
@@ -103,4 +109,63 @@ export function closeTab(id: string) {
   }
   tabs.list.splice(i, 1);
   if (tabs.activeId === id) tabs.activeId = tabs.list[Math.min(i, tabs.list.length - 1)].id;
+}
+
+export interface AiTabInput {
+  title: string;
+  sql: string;
+  conn: Conn;
+  database: string;
+  /** The model's choice: a new tab, the active one, or the best match. */
+  target: 'new' | 'current' | 'best';
+  result: QueryResult;
+}
+
+const normalizeSql = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+
+/** A tab the assistant may write into: no table view, no saved query, no open transaction, and empty or AI-owned. */
+function aiWritable(t: Tab | undefined): t is Tab {
+  return !!t && !t.table && !t.savedId && !t.status?.pending && !t.status?.aborted && (!t.query.trim() || t.origin === 'ai');
+}
+
+/**
+ * Opens the result of an AI answer and makes its tab active at once. `target` is the model's
+ * choice; this function enforces the safety rules: it never replaces a tab that holds the user's
+ * work, a saved query, a table view or an open transaction. A new tab is the fallback.
+ */
+export function openAiTab(input: AiTabInput): Tab {
+  const same = (t: Tab) => t.connId === input.conn.id && t.database === input.database;
+  const exact = (t: Tab) => !!t.query.trim() && normalizeSql(t.query) === normalizeSql(input.sql);
+  const siblings = tabs.list.filter(same);
+  let t: Tab | undefined;
+
+  if (input.target !== 'new') {
+    // The same query is already in a safe tab: show the result there, does not type it again.
+    t = [...siblings].reverse().find((x) => exact(x) && aiWritable(x));
+    if (!t && input.target === 'current') {
+      const a = activeTab();
+      if (a && same(a) && aiWritable(a)) t = a;
+    }
+    if (!t) t = [...siblings].reverse().find(aiWritable);
+  }
+
+  if (!t) t = newTab();
+  const unchanged = exact(t);
+  t.connId = input.conn.id;
+  t.database = input.database;
+  t.resultConn = input.conn;
+  t.title = input.title.trim() || 'AI query';
+  t.result = input.result;
+  t.opened = null;
+  t.table = null;
+  t.savedId = null;
+  t.filters = [];
+  t.sort = undefined;
+  t.view = 'data';
+  t.origin = 'ai';
+  // Type the SQL only when it changes; a refresh of the same query keeps the text as it is.
+  t.query = unchanged ? input.sql : '';
+  t.aiTyping = unchanged ? null : input.sql;
+  tabs.activeId = t.id;
+  return t;
 }

@@ -24,6 +24,8 @@ pub const UI_ROWS: usize = 50;
 /// Rows a chart keeps. Charts are saved with the chat, so this stays small.
 pub const CHART_ROWS: usize = 1000;
 const CHART_TYPES: [&str; 5] = ["bar", "line", "area", "pie", "scatter"];
+/// Where `open_query_tab` puts the result: a new tab, the user's active tab, or the best match.
+const TAB_TARGETS: [&str; 3] = ["new", "current", "best"];
 /// Most value columns of one chart.
 const MAX_SERIES: usize = 8;
 const CUT_MARKER: &str = "\n[cut: the tool output was longer than 32 KiB]";
@@ -111,6 +113,22 @@ fn base_definitions() -> Value {
                         "stacked": {"type": "boolean", "description": "Stack the series (bar and area)."}
                     },
                     "required": ["sql", "type", "x", "y"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "open_query_tab",
+                "description": "Run one read-only SQL statement and show its result in an editor tab, so the user can sort, filter, page and export it. Use it when the user asks to see the data in a tab or to run a query in a tab, and when a result table is the answer. It never changes data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "Exactly one read-only statement."},
+                        "title": {"type": "string", "description": "Short tab name in the user's language, 2 to 5 words. Describe the request, not the SQL."},
+                        "target": {"type": "string", "enum": TAB_TARGETS, "description": "new: a new tab; current: the user's active tab when it is safe; best: the tab that already shows this result."}
+                    },
+                    "required": ["sql", "title"]
                 }
             }
         },
@@ -249,7 +267,8 @@ pub async fn execute(ctx: &ToolContext<'_>, id: &str, name: &str, raw_args: &str
             }
         }
         Err(e) => {
-            let read = name == "run_read_query" || name == "render_chart";
+            let read =
+                name == "run_read_query" || name == "render_chart" || name == "open_query_tab";
             let hide = read && ctx.settings.privacy == Privacy::Schema;
             let err = model_error(&e, hide);
             ToolOutput {
@@ -315,6 +334,7 @@ async fn run(
         "describe_table" => describe_table(ctx, args).await,
         "run_read_query" => run_read_query(ctx, args).await,
         "render_chart" => render_chart(ctx, id, args).await,
+        "open_query_tab" => open_query_tab(ctx, id, args).await,
         "propose_write" => propose_write(ctx, id, args),
         _ => Err(AppError::not_found(format!("Unknown tool {name}"))),
     }
@@ -401,6 +421,78 @@ async fn run_read_query(
         rows: Some(rows),
         truncated: Some(ui_truncated),
         preview: None,
+        content,
+    })
+}
+
+/// A tab title from the model: one line, at most 48 characters.
+fn tab_title(raw: &str) -> Result<String, AppError> {
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title: String = title.chars().filter(|c| !c.is_control()).collect();
+    if title.is_empty() {
+        return Err(AppError::invalid("The tool needs a title for the tab"));
+    }
+    Ok(if title.chars().count() > 48 {
+        let mut cut: String = title.chars().take(47).collect();
+        cut.push('…');
+        cut
+    } else {
+        title
+    })
+}
+
+/// Runs one read and hands the rows to the UI with `tab_open`; the chat step stays compact.
+async fn open_query_tab(
+    ctx: &ToolContext<'_>,
+    id: &str,
+    args: &Map<String, Value>,
+) -> Result<Done, AppError> {
+    let src = ctx.source(args)?;
+    let sql = req_str(args, "sql")?;
+    let title = tab_title(req_str(args, "title")?)?;
+    let target = opt_str(args, "target").unwrap_or("new");
+    if !TAB_TARGETS.contains(&target) {
+        return Err(AppError::invalid(format!(
+            "The tab target must be one of: {}",
+            TAB_TARGETS.join(", ")
+        )));
+    }
+    let r = readonly::run_ai_read(
+        ctx.state,
+        &src.conn.id,
+        Some(&src.database),
+        sql,
+        limits(ctx),
+    )
+    .await?;
+    let columns: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+    let types: Vec<String> = r.columns.iter().map(|c| c.data_type.clone()).collect();
+    let n = r.rows.len();
+    let summary = format!("{} · tab {}", count(n, "row", "rows"), quoted(&title));
+    let mut content = read_content(&r, ctx.settings.privacy);
+    content["shownInTab"] = json!(title);
+    content["note"] = json!(
+        "The user sees this result in an editor tab. Do not repeat the rows in your reply; summarize them."
+    );
+    Ok(Done {
+        summary,
+        columns: None,
+        rows: None,
+        truncated: None,
+        preview: Some(ChatEvent::TabOpen {
+            id: id.to_string(),
+            title,
+            sql: sql.to_string(),
+            conn_id: src.conn.id.clone(),
+            database: src.database.clone(),
+            target: target.to_string(),
+            columns,
+            types,
+            rows: r.rows,
+            truncated: r.truncated,
+            limit: ctx.settings.max_rows as usize,
+            elapsed_ms: r.elapsed_ms,
+        }),
         content,
     })
 }
@@ -713,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn definitions_name_five_tools() {
+    fn definitions_name_six_tools() {
         let names: Vec<String> = definitions(&["db1"])
             .as_array()
             .unwrap()
@@ -727,6 +819,7 @@ mod tests {
                 "describe_table",
                 "run_read_query",
                 "render_chart",
+                "open_query_tab",
                 "propose_write"
             ]
         );

@@ -14,9 +14,10 @@ const toolScenarios = {
   bypass: ['run_read_query', { sql: 'DELETE FROM orders' }],
   write: ['propose_write', { sql: "UPDATE orders SET status = 'shipped' WHERE id = 1" }],
   chart: ['render_chart', { sql: 'SELECT status, count(*) AS orders FROM orders GROUP BY status ORDER BY status', type: 'bar', title: 'Orders by status', x: 'status', y: ['orders'] }],
+  tab: ['open_query_tab', { sql: 'SELECT status, count(*) AS orders FROM orders GROUP BY status ORDER BY status', title: 'Orders by status', target: 'new' }],
 };
 // Checked in this order, so "error" and "slow" win over tool keywords.
-const keywords = ['error', 'slow', 'bypass', 'write', 'chart', 'describe', 'count', 'list'];
+const keywords = ['error', 'slow', 'bypass', 'write', 'tab', 'chart', 'describe', 'count', 'list'];
 
 let seq = 0;
 const nextId = (p) => `${p}_${Date.now().toString(36)}${(++seq).toString(36)}`;

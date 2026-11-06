@@ -356,6 +356,27 @@ export type ChatEvent =
   | { type: 'write_preview'; id: string; sql: string; info: WriteInfo }
   /** Sent before the matching `tool_result` of a `render_chart` call. At most 1000 rows, for this UI only. */
   | { type: 'chart'; id: string; spec: ChartSpec; columns: string[]; rows: CellValue[][]; truncated: boolean }
+  /**
+   * Sent before the matching `tool_result` of an `open_query_tab` call. The UI opens or replaces a
+   * tab with this query and result; the rows are for this UI only.
+   */
+  | {
+      type: 'tab_open';
+      id: string;
+      title: string;
+      sql: string;
+      connId: string;
+      database: string;
+      /** The tab the model picked: a new one, the active one, or the best match. */
+      target: 'new' | 'current' | 'best';
+      columns: string[];
+      types: string[];
+      rows: CellValue[][];
+      truncated: boolean;
+      /** The row limit this read used. */
+      limit: number;
+      elapsedMs: number;
+    }
   | { type: 'error'; error: AppErrorBody }
   | { type: 'done' };
 

@@ -4,6 +4,9 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+- The assistant can open a query tab with the result of your question, give the tab a name, and make it the active tab. It picks a new tab, your active tab when it is safe to replace, or the tab that already shows the result. It never replaces a tab with your work, a saved query or an open transaction; in that case it opens a new tab.
+- When the assistant writes the SQL, the editor types it out, so you can see the query appear. Press a key or click in the editor to show the whole query at once. The Run button waits until the query is complete, and ⌘↵ runs the whole statement.
+
 ## [0.7.3] - 2026-11-05
 
 - Fixed: the SQL editor did not always show the cursor in the macOS app. Now the editor draws the cursor itself, so you can always see it.

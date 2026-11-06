@@ -140,6 +140,16 @@ pub fn system_prompt(p: &PromptInput<'_>) -> String {
          render_chart fails, say so and fix the call.\n",
     );
     s.push_str(
+        "- open_query_tab shows a result in an editor tab, where the user can sort, filter, page \
+         and export it. Use it when the user asks to see or run data in a tab, or when a result \
+         table is the answer. Give a short title (2 to 5 words) in the user's language, taken from \
+         the request, not from the SQL. Pick target: \"new\" for a new question or an independent \
+         analysis; \"current\" when the user wants the active tab and it is safe to replace; \
+         \"best\" to reuse the tab that already shows this result. The app never replaces a tab \
+         with unsaved work: it opens a new tab instead. Never use this tool for a write. The tool \
+         returns the rows too; do not run the same query again with run_read_query.\n",
+    );
+    s.push_str(
         "- When the user asks for a report, write it as one document in your reply: a # title, \
          a short summary, ## sections with the findings, charts from render_chart where they \
          help, and small Markdown tables of key figures. You cannot create files. When the user \

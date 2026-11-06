@@ -1,8 +1,10 @@
-import { schemas, tableData, nsOf, type Row, type Cell } from './mock';
+import { schemas, tableData, nsOf, type Row, type Cell, type QueryResult } from './mock';
 import { active, ui, db, canWrite, flushAi, type Conn } from './state.svelte';
-import { activeTab, defaultDb } from './tabs.svelte';
+import { activeTab, defaultDb, openAiTab } from './tabs.svelte';
 import { api, ApiError, type CellValue, type ChartSpec, type ChatEvent, type ChatRequest, type ErrorCode } from './api';
 import { logQuery, type AuditResult } from './audit.svelte';
+import { uniqueNames } from './results';
+import { pendingCount } from './edits.svelte';
 
 export type ToolStatus = 'running' | 'done' | 'blocked' | 'awaiting' | 'approved' | 'denied';
 /**
@@ -347,6 +349,29 @@ async function liveReply(msg: Msg, text: string, sources: Source[], history: Cha
       case 'chart':
         msg.parts.push({ kind: 'chart', spec: e.spec, columns: e.columns, rows: e.rows, truncated: e.truncated });
         break;
+      case 'tab_open': {
+        const conn = db.connections.find((c) => c.id === e.connId);
+        if (!conn) break;
+        const columns = uniqueNames(e.columns);
+        const result: QueryResult = {
+          columns,
+          rows: e.rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i] as Cell]))),
+          ms: e.elapsedMs,
+          types: e.types,
+          truncated: e.truncated,
+          limit: e.limit,
+          database: e.database,
+          sql: e.sql,
+          isRead: true,
+          live: true,
+        };
+        openAiTab({ title: e.title, sql: e.sql, conn, database: e.database, target: pendingCount() ? 'new' : e.target, result });
+        // The result is the answer: show the editor, not Settings or the audit log.
+        ui.page = 'query';
+        ui.resultsOpen = true;
+        logQuery({ conn, kind: 'READ', source: 'AI', sql: e.sql, result: { status: 'ok', rows: e.rows.length }, ms: e.elapsedMs });
+        break;
+      }
       case 'tool_result': {
         const step = steps.get(e.id);
         if (!step) break;
@@ -440,6 +465,33 @@ async function reply(msg: Msg, text: string, conn: Conn) {
   // A table named in the message ("table notes", "from notes", "from table notes"), else any table name in the text.
   const named = /\b(?:from|table)\s+(?:table\s+)?[`"']?(\w+)/i.exec(text)?.[1];
   let target = named ? find(tables, named) : tables.find((t) => new RegExp(`\\b${t}\\b`, 'i').test(text));
+
+  // Mock only: "open a tab" shows the same result an AI tab gets from the live backend.
+  if (/\btab\b/i.test(text)) {
+    target ??= tables[0];
+    const data = tableData(schema, target);
+    const columns = schema[target];
+    const rows = data.base.slice(0, 50);
+    const sql = `SELECT *\nFROM ${nsOf(conn.engine, target)}.${target}\nLIMIT 100;`;
+    const title = `${target} data`;
+    const tabTarget = /\b(same|current)\s+tab\b/i.test(text) ? 'current' : /\b(again|reuse|best)\b/i.test(text) ? 'best' : 'new';
+    const q = await tool(msg, { kind: 'tool', name: 'open_query_tab', sql, status: 'running' }, 450);
+    finish(q);
+    q.note = `${rows.length} rows · 12 ms · tab “${title}”`;
+    openAiTab({
+      title,
+      sql,
+      conn,
+      database: defaultDb(conn),
+      target: tabTarget,
+      result: { columns, rows, ms: 12, types: columns.map(() => 'text'), truncated: data.base.length > rows.length, limit: 100, database: defaultDb(conn), sql, isRead: true },
+    });
+    ui.page = 'query';
+    ui.resultsOpen = true;
+    logQuery({ conn, kind: 'READ', source: 'AI', sql, result: { status: 'ok', rows: rows.length }, ms: 12 });
+    await stream(msg, `I opened **${title}** in a tab. The editor is writing the query, then the grid shows the first ${rows.length} rows.`);
+    return;
+  }
 
   if (!named && schema.orders && /\b(chart|graph|plot|report)\b/i.test(text)) {
     const q = await tool(msg, { kind: 'tool', name: 'render_chart', sql: 'SELECT status, sum(total) AS revenue\nFROM public.orders\nGROUP BY status\nORDER BY revenue DESC;', status: 'running' }, 800);

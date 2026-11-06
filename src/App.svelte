@@ -330,6 +330,11 @@
   async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql: string; script?: string; sort?: ResultSort }) {
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
+    // Run while the assistant is still typing: use the whole statement, not the half-written text.
+    if (t.aiTyping) {
+      t.query = t.aiTyping;
+      t.aiTyping = null;
+    }
     if (running[t.id] || (!again && !confirmDiscard())) return;
     const sql = again?.sql ?? pick?.sql ?? (editor?.selection().trim() || t.query);
     const sort = again?.sort ?? pick?.sort;
@@ -922,6 +927,9 @@
       {:else if kind === 'write'}
         <span class="shrink-0 px-1 text-[12px] font-medium text-amber-700 dark:text-amber-400">Write</span>
       {/if}
+      {#if tab.aiTyping}
+        <span class="flex shrink-0 items-center gap-1 px-1 text-[12px] font-medium text-accent" role="status" title="The assistant is writing this query"><Sparkles size={12} class="animate-pulse" /> <span class="hidden xl:inline">Writing…</span></span>
+      {/if}
       <!-- A saved, unchanged tab shows "Saved"; ⌘S then has nothing to write. -->
       <button class="btn btn-ghost shrink-0 px-2 xl:px-2.5" onclick={() => saveQuery()} disabled={!savedQ && kind === 'empty'} title={savedQ ? (tabClean ? `“${savedQ.name}” is saved · ⇧⌘S saves a copy` : `Save changes to “${savedQ.name}” (⌘S)`) : 'Save query (⌘S)'} aria-label={tabClean ? 'Saved' : 'Save query'}>
         {#if tabClean}<Check size={14} class="text-emerald-600 dark:text-emerald-400" />{:else}<Save size={14} />{/if}
@@ -944,7 +952,7 @@
         <span class="font-mono text-[11.5px] text-muted tabular-nums">{((now - busy.started) / 1000).toFixed(1)} s</span>
         <button class="btn btn-secondary" onclick={cancel} title="Cancel the running query"><Square size={11} class="fill-current" /> Cancel</button>
       {:else}
-        <button class="btn btn-primary pr-2" onclick={() => run()} disabled={kind === 'empty'} title="Run the selection, or the whole editor"><Play size={11} class="fill-current" /> Run <kbd class="ml-0.5 hidden font-sans text-[11px] font-normal lg:inline" aria-hidden="true">⌘↵</kbd></button>
+        <button class="btn btn-primary pr-2" onclick={() => run()} disabled={kind === 'empty' || !!tab.aiTyping} title={tab.aiTyping ? 'Wait for the assistant to finish writing, or press Run to use the whole query' : 'Run the selection, or the whole editor'}><Play size={11} class="fill-current" /> Run <kbd class="ml-0.5 hidden font-sans text-[11px] font-normal lg:inline" aria-hidden="true">⌘↵</kbd></button>
       {/if}
     </div>
 
@@ -952,7 +960,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} {columnsOf} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} {columnsOf} dialect={conn.engine} typing={tab.aiTyping} ontyped={() => (tab.aiTyping = null)} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />

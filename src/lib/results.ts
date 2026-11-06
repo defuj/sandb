@@ -44,7 +44,7 @@ const outcome = (s: StatementResult) =>
   s.columns.length ? `${s.rowCount}${s.truncated ? '+' : ''} row${s.rowCount === 1 ? '' : 's'}` : `${s.affected ?? 0} affected`;
 
 // Grid rows are keyed by column name, so a repeated name (`SELECT a.id, b.id`) gets a suffix.
-function uniqueNames(names: string[]) {
+export function uniqueNames(names: string[]) {
   const seen = new Map<string, number>();
   return names.map((n) => {
     const k = (seen.get(n) ?? 0) + 1;

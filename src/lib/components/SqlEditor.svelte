@@ -16,6 +16,8 @@
     schema = {},
     dialect = 'pg',
     columnsOf,
+    typing = null,
+    ontyped,
   }: {
     value?: string;
     onrun?: () => void;
@@ -23,6 +25,9 @@
     dialect?: 'pg' | 'mysql' | 'sqlite';
     /** Columns of a table that `schema` holds without columns (or not under this name); [] when unknown. */
     columnsOf?: (path: string[]) => Promise<string[]>;
+    /** SQL the assistant is writing; the editor types it out, then calls `ontyped`. */
+    typing?: string | null;
+    ontyped?: () => void;
   } = $props();
 
   const lang = new Compartment();
@@ -147,6 +152,62 @@
   let el: HTMLDivElement;
   let view = $state.raw<EditorView>();
 
+  // The assistant's typewriter. The tab holds the full SQL in `aiTyping`; the editor inserts it in
+  // chunks, so `value` grows with the text and the user can still take over at any moment.
+  let typedFor: string | null = null;
+  let typeTimer: ReturnType<typeof setTimeout> | undefined;
+  let typingNow = false;
+  /** The text this animation is writing; kept when the parent clears `typing` mid-way. */
+  let typingTarget: string | null = null;
+
+  function cancelTyping() {
+    if (typeTimer) clearTimeout(typeTimer);
+    typeTimer = undefined;
+    typingNow = false;
+  }
+
+  /** Stops the animation and shows the whole text at once. */
+  function finishTyping() {
+    const target = typingTarget ?? typing;
+    cancelTyping();
+    typingTarget = null;
+    if (target == null) return;
+    typedFor = target;
+    if (view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: target }, selection: { anchor: target.length }, scrollIntoView: true });
+    ontyped?.();
+  }
+
+  function typeText(target: string) {
+    if (!view) return;
+    cancelTyping();
+    typingTarget = target;
+    typedFor = target;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } });
+    if (!target || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (target) view.dispatch({ changes: { from: 0, insert: target }, selection: { anchor: target.length } });
+      ontyped?.();
+      return;
+    }
+    typingNow = true;
+    const chars = Array.from(target);
+    const size = Math.max(1, Math.ceil(chars.length / 60));
+    let i = 0;
+    const tick = () => {
+      if (!typingNow || !view) return;
+      const next = chars.slice(i, i + size).join('');
+      i += size;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: next }, selection: { anchor: view.state.doc.length + next.length }, scrollIntoView: true });
+      if (i >= chars.length) {
+        typingNow = false;
+        typeTimer = undefined;
+        ontyped?.();
+        return;
+      }
+      typeTimer = setTimeout(tick, 14);
+    };
+    tick();
+  }
+
   const hl = HighlightStyle.define([
     { tag: t.keyword, color: 'var(--c-accent)', fontWeight: '500' },
     { tag: [t.string, t.special(t.string)], color: 'var(--c-syn-string)' },
@@ -183,6 +244,11 @@
           highlightActiveLine(),
           history(),
           keymap.of([{ key: 'Mod-Enter', run: () => (onrun?.(), true) }, ...defaultKeymap, ...historyKeymap]),
+          EditorView.domEventHandlers({
+            // The user takes over: show the whole text, then let the key or click through.
+            keydown: () => (typingNow ? (finishTyping(), false) : false),
+            mousedown: () => (typingNow ? (finishTyping(), false) : false),
+          }),
           lang.of(langExt()),
           autocompletion(),
           EditorState.languageData.of(() => [{ autocomplete: columnsInScope }, { autocomplete: lazyColumns }]),
@@ -194,7 +260,25 @@
         ],
       }),
     });
-    return () => view?.destroy();
+    return () => {
+      // Leaving the tab mid-animation: keep the whole SQL, not a half-written query.
+      if (typingNow && (typingTarget ?? typing) != null) {
+        finishTyping();
+      }
+      cancelTyping();
+      view?.destroy();
+    };
+  });
+
+  $effect(() => {
+    const target = typing;
+    if (target == null) {
+      // The parent cleared the animation; show the whole text instead of a prefix.
+      if (typingNow) finishTyping();
+      return;
+    }
+    if (!view || target === typedFor) return;
+    typeText(target);
   });
 
   $effect(() => {
@@ -205,6 +289,8 @@
   // Sync when the parent replaces the text (e.g. clicking a table in the sidebar).
   $effect(() => {
     const v = value;
+    // While the assistant types, the editor owns the text; user input ends the animation first.
+    if (typingNow) return;
     if (view && v !== view.state.doc.toString()) {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: v } });
     }

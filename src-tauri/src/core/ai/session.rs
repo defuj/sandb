@@ -113,6 +113,26 @@ pub enum ChatEvent {
         /// More rows exist than `rows` holds.
         truncated: bool,
     },
+    /// The result of an `open_query_tab` read, sent before its `tool_result`. The UI opens or
+    /// replaces an editor tab with this query and result; the rows are for the local UI only.
+    #[serde(rename_all = "camelCase")]
+    TabOpen {
+        id: String,
+        title: String,
+        sql: String,
+        conn_id: String,
+        database: String,
+        /// `new`, `current` or `best`: the tab the model picked.
+        target: String,
+        columns: Vec<String>,
+        types: Vec<String>,
+        rows: Vec<Vec<Value>>,
+        /// More rows exist than `rows` holds.
+        truncated: bool,
+        /// The row limit this read used.
+        limit: usize,
+        elapsed_ms: u64,
+    },
     Error {
         error: AppError,
     },
@@ -555,6 +575,61 @@ mod tests {
         events
     }
 
+    #[tokio::test]
+    async fn open_query_tab_returns_rows_and_a_clean_title() {
+        let (dir, st, _) = state_with("http://127.0.0.1:1/v1");
+        let conn_id = sqlite_conn(&st, dir.path(), "tab", 3).await;
+        let conn = connections::get(&st, &conn_id).unwrap();
+        let sources = [tools::Source {
+            id: "db1".into(),
+            conn,
+            database: "main".into(),
+            schema: None,
+            allow_writes: false,
+        }];
+        let ctx = tools::ToolContext {
+            state: &st,
+            sources: &sources,
+            settings: &AiSettings::default(),
+        };
+        let args = json!({
+            "sql": "SELECT id FROM t ORDER BY id",
+            "title": "  Rows   of t ",
+            "target": "new"
+        })
+        .to_string();
+        let out = tools::execute(&ctx, "c1", "open_query_tab", &args).await;
+        assert_eq!(out.events.len(), 2, "{:?}", out.events);
+        match &out.events[0] {
+            ChatEvent::TabOpen {
+                id,
+                title,
+                conn_id: event_conn,
+                database,
+                target,
+                columns,
+                rows,
+                limit,
+                ..
+            } => {
+                assert_eq!(id, "c1");
+                assert_eq!(title, "Rows of t");
+                assert_eq!(event_conn, &conn_id);
+                assert_eq!(database, "main");
+                assert_eq!(target, "new");
+                assert_eq!(columns, &vec!["id".to_string()]);
+                assert_eq!(rows.len(), 3);
+                assert_eq!(*limit, AiSettings::default().max_rows as usize);
+            }
+            other => panic!("expected tab_open, got {other:?}"),
+        }
+        assert!(matches!(
+            &out.events[1],
+            ChatEvent::ToolResult { ok: true, .. }
+        ));
+        assert!(out.content.contains("shownInTab"), "{}", out.content);
+    }
+
     #[test]
     fn events_serialize_with_snake_case_type() {
         let v = serde_json::to_value(ChatEvent::ToolCall {
@@ -585,6 +660,25 @@ mod tests {
             serde_json::to_value(ChatEvent::Done).unwrap(),
             json!({"type": "done"})
         );
+        let v = serde_json::to_value(ChatEvent::TabOpen {
+            id: "t1".into(),
+            title: "Paid orders".into(),
+            sql: "SELECT 1".into(),
+            conn_id: "c1".into(),
+            database: "main".into(),
+            target: "new".into(),
+            columns: vec!["n".into()],
+            types: vec!["int4".into()],
+            rows: vec![vec![json!(1)]],
+            truncated: false,
+            limit: 500,
+            elapsed_ms: 3,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "tab_open");
+        assert_eq!(v["connId"], "c1");
+        assert_eq!(v["elapsedMs"], 3);
+        assert_eq!(v["rows"][0][0], 1);
     }
 
     #[test]
@@ -636,7 +730,7 @@ mod tests {
         assert_eq!(msgs[1], json!({"role": "user", "content": "earlier"}));
         assert_eq!(msgs[2], json!({"role": "user", "content": "hello"}));
         assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 6);
     }
 
     #[tokio::test]
