@@ -846,17 +846,22 @@ fn is_sortable(engine: Engine, stmts: &[String], reads: &[bool]) -> bool {
     )
 }
 
-/// Flags the single result of a sortable run, so the grid offers sorting only where it works.
+/// Flags each result whose statement is a lone plain read, so the grid offers sorting only where
+/// it works. A multi-statement run returns one result per statement on the common path; when a
+/// statement returns more than one set the counts do not line up and nothing is marked.
 fn mark_sortable(
     engine: Engine,
     stmts: &[String],
     reads: &[bool],
     results: &mut [StatementResult],
 ) {
-    if let [r] = results
-        && is_sortable(engine, stmts, reads)
-    {
-        r.sortable = true;
+    if stmts.len() != reads.len() || stmts.len() != results.len() {
+        return;
+    }
+    for (i, r) in results.iter_mut().enumerate() {
+        if reads[i] && is_sortable(engine, &stmts[i..=i], &reads[i..=i]) {
+            r.sortable = true;
+        }
     }
 }
 
@@ -1517,6 +1522,39 @@ mod tests {
             &["SELECT 1".into(), "SELECT 2".into()],
             &[true, true]
         ));
+    }
+
+    #[test]
+    fn each_result_of_a_multi_statement_run_is_sortable() {
+        let result = |sql: &str, is_read: bool| StatementResult {
+            sql: sql.into(),
+            row_count: 0,
+            affected: None,
+            columns: vec![],
+            rows: vec![],
+            truncated: false,
+            is_read,
+            sortable: false,
+            elapsed_ms: 0,
+        };
+        let mut results = vec![result("SELECT 1", true), result("SELECT 2", true)];
+        mark_sortable(
+            Engine::Pg,
+            &["SELECT 1".into(), "SELECT 2".into()],
+            &[true, true],
+            &mut results,
+        );
+        assert!(results.iter().all(|r| r.sortable));
+
+        let mut mixed = vec![result("SELECT 1", true), result("DELETE FROM t", false)];
+        mark_sortable(
+            Engine::Pg,
+            &["SELECT 1".into(), "DELETE FROM t".into()],
+            &[true, false],
+            &mut mixed,
+        );
+        assert!(mixed[0].sortable);
+        assert!(!mixed[1].sortable);
     }
 
     #[test]

@@ -1,24 +1,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
-  import { EditorState, Compartment } from '@codemirror/state';
+  import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, gutter, GutterMarker } from '@codemirror/view';
+  import { EditorState, Compartment, RangeSetBuilder, type RangeSet, type Text } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll as selectAllCmd } from '@codemirror/commands';
   import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
   import { syntaxHighlighting, HighlightStyle, syntaxTree } from '@codemirror/language';
   import { autocompletion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
   import { tags as t } from '@lezer/highlight';
   import { columnCompletion } from '../sql/columns';
-  import { statementRanges } from '../sql/text';
+  import { statementRanges, maskLiterals, type Dialect } from '../sql/text';
 
   let {
     value = $bindable(''),
     onrun,
+    onrunstatement,
     schema = {},
     dialect = 'pg',
     columnsOf,
   }: {
     value?: string;
     onrun?: () => void;
+    /** Runs one statement from the Run gutter, without changing the editor text. */
+    onrunstatement?: (sql: string) => void;
     schema?: Record<string, string[]>;
     dialect?: 'pg' | 'mysql' | 'sqlite';
     /** Columns of a table that `schema` holds without columns (or not under this name); [] when unknown. */
@@ -144,6 +147,70 @@
     return (parts.find((p) => head <= p.to) ?? parts.at(-1))?.text ?? '';
   }
 
+  /** A play button in the gutter at the first line of each statement. */
+  const runIcon = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1.5 8.5 5 2 8.5Z" fill="currentColor"/></svg>';
+  class RunStatementMarker extends GutterMarker {
+    readonly sql: string;
+    constructor(sql: string) {
+      super();
+      this.sql = sql;
+    }
+    eq(other: GutterMarker) {
+      return other instanceof RunStatementMarker && other.sql === this.sql;
+    }
+    toDOM() {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cm-statement-run';
+      b.title = 'Run this statement (⇧⌘↵)';
+      b.setAttribute('aria-label', 'Run this statement');
+      b.tabIndex = -1;
+      b.innerHTML = runIcon;
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onrunstatement?.(this.sql);
+      });
+      return b;
+    }
+  }
+
+  /** One marker per line that starts a statement; comments alone get no marker. */
+  let markerDoc: Text | null = null;
+  let markerDialect: Dialect | null = null;
+  let markerSet: RangeSet<GutterMarker> | null = null;
+
+  const runGutter = gutter({
+    class: 'cm-run-gutter',
+    markers: (v) => {
+      // The gutter asks for markers on every view update; only a new document or dialect can change them.
+      if (v.state.doc === markerDoc && dialect === markerDialect && markerSet) return markerSet;
+      const doc = v.state.doc.toString();
+      const builder = new RangeSetBuilder<GutterMarker>();
+      let lastLine = -1;
+      for (const [from, to] of statementRanges(doc, dialect)) {
+        const raw = doc.slice(from, to);
+        // Comments and strings are blanked; a comments-only range gets nothing.
+        const masked = maskLiterals(raw, dialect);
+        if (!masked.trim()) continue;
+        const text = raw.trim();
+        const at = from + masked.length - masked.trimStart().length;
+        const line = v.state.doc.lineAt(at);
+        if (line.from === lastLine) continue;
+        lastLine = line.from;
+        builder.add(line.from, line.from, new RunStatementMarker(text));
+      }
+      markerDoc = v.state.doc;
+      markerDialect = dialect;
+      markerSet = builder.finish();
+      return markerSet;
+    },
+    // Cursor moves and scrolling do not redraw the gutter; a dialect reconfigure does.
+    lineMarkerChange: (u) => u.docChanged || u.transactions.some((tr) => tr.reconfigured),
+    initialSpacer: () => new RunStatementMarker(''),
+  });
+
   let el: HTMLDivElement;
   let view = $state.raw<EditorView>();
 
@@ -162,6 +229,22 @@
     '.cm-scroller': { fontFamily: "'JetBrains Mono Variable', ui-monospace, monospace", lineHeight: '1.6' },
     '.cm-content': { padding: '2px 0 8px' },
     '.cm-gutters': { backgroundColor: 'transparent', border: 'none', color: 'var(--c-faint)', paddingLeft: '10px', paddingRight: '4px' },
+    '.cm-run-gutter': { width: '18px' },
+    '.cm-run-gutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0' },
+    '.cm-run-gutter .cm-statement-run': {
+      display: 'grid',
+      placeItems: 'center',
+      width: '16px',
+      height: '18px',
+      padding: '0',
+      border: 'none',
+      borderRadius: '3px',
+      background: 'transparent',
+      color: 'var(--c-faint)',
+      opacity: '0.7',
+      cursor: 'pointer',
+    },
+    '.cm-run-gutter .cm-statement-run:hover': { color: 'var(--c-accent)', opacity: '1' },
     '.cm-activeLine': { backgroundColor: 'var(--c-hover)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--c-ink)' },
     '.cm-cursor': { borderLeftColor: 'var(--c-accent)', borderLeftWidth: '2px' },
@@ -177,12 +260,27 @@
       state: EditorState.create({
         doc: value,
         extensions: [
+          ...(onrunstatement ? [runGutter] : []),
           lineNumbers(),
           // CodeMirror draws the cursor: WebKit (Tauri) drops the native caret under the glass panels.
           drawSelection(),
           highlightActiveLine(),
           history(),
-          keymap.of([{ key: 'Mod-Enter', run: () => (onrun?.(), true) }, ...defaultKeymap, ...historyKeymap]),
+          keymap.of([
+            { key: 'Mod-Enter', run: () => (onrun?.(), true) },
+            // Keyboard counterpart of the gutter play button.
+            {
+              key: 'Mod-Shift-Enter',
+              run: () => {
+                const sql = statementAt();
+                if (!sql || !onrunstatement) return false;
+                onrunstatement(sql);
+                return true;
+              },
+            },
+            ...defaultKeymap,
+            ...historyKeymap,
+          ]),
           lang.of(langExt()),
           autocompletion(),
           EditorState.languageData.of(() => [{ autocomplete: columnsInScope }, { autocomplete: lazyColumns }]),

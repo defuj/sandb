@@ -256,8 +256,8 @@ export const mockBackend: Backend = {
           rowCount: rows.length,
           truncated: r.rows.length > rows.length,
           affected: r.columns.length ? undefined : 0,
-          isRead: parts.length === 1 && statementKind(part) === 'read',
-          sortable: parts.length === 1 && statementKind(part) === 'read' && /^(select|with|values)\b/i.test(bare(part)),
+          isRead: statementKind(part) === 'read',
+          sortable: statementKind(part) === 'read' && /^(select|with|values)\b/i.test(bare(part)),
           elapsedMs: r.ms,
           table: r.table,
         });

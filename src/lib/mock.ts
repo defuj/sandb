@@ -9,6 +9,8 @@ export interface QueryResult {
   ms: number;
   note?: string;
   error?: string;
+  /** Tab label when the result is not a table (e.g. "Messages"). */
+  title?: string;
   /** Source table and SQL of a SELECT result; edit mode uses them. */
   table?: string;
   sql?: string;
@@ -24,6 +26,8 @@ export interface QueryResult {
   summary?: string[];
   /** The shown statement is a plain read, so "Load more" and export may run it again. */
   isRead?: boolean;
+  /** Server-side sort of this result, kept when the user switches result tabs. */
+  sort?: ResultSort;
   /** The shown statement is a query the backend can add ORDER BY to (not EXPLAIN / SHOW). */
   sortable?: boolean;
   /** Backend notices, e.g. a rolled-back open transaction. */
@@ -141,7 +145,7 @@ export function tableData(schema: Schema, table: string) {
 }
 
 export function statementKind(sql: string): 'read' | 'write' | 'empty' {
-  const first = sql.replace(/--.*$/gm, '').trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+  const first = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim().split(/\s+/)[0]?.toLowerCase() ?? '';
   if (!first) return 'empty';
   return ['select', 'with', 'show', 'explain', 'describe'].includes(first) ? 'read' : 'write';
 }

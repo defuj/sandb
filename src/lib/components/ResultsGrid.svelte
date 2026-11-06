@@ -567,7 +567,7 @@
         <button class="btn btn-primary h-7 px-3 text-[12px]" onclick={() => (dialog = 'save')}>Save</button>
       {:else}
         <span class="flex items-center gap-2.5 px-1.5 text-[12px] text-faint tabular-nums">
-          <span title={result.truncated ? `First ${result.rows.length} rows; ${result.isRead ? 'scroll down to load more' : 'more exist. Only a single read-only statement loads more, because loading runs the SQL again'}` : undefined}>{rows.length}{result.truncated ? '+' : ''} rows</span>
+          <span title={result.truncated ? `First ${result.rows.length} rows; ${result.isRead ? 'scroll down to load more' : 'more exist. Only a read-only statement loads more, because loading runs the SQL again'}` : undefined}>{rows.length}{result.truncated ? '+' : ''} rows</span>
           <span class="size-0.5 rounded-full bg-faint"></span>
           <span>{result.ms} ms</span>
         </span>
