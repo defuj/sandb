@@ -12,6 +12,10 @@ export interface Tab {
   database: string;
   query: string;
   result: QueryResult | null;
+  /** Results of the last run, one tab per statement that returned columns, plus Messages for writes. */
+  results: QueryResult[];
+  /** Index of the result shown in the grid. */
+  resultIndex: number;
   /** The connection that produced `result`. */
   resultConn: Conn;
   /** Tree key and SQL of the table opened from the tree or the palette (real backends). */
@@ -56,6 +60,8 @@ export function newTab(query = ''): Tab {
     database: from?.database ?? defaultDb(c),
     query,
     result: null,
+    results: [],
+    resultIndex: 0,
     resultConn: c,
     opened: null,
     status: null,
@@ -68,6 +74,66 @@ export function newTab(query = ''): Tab {
   const t = tabs.list[tabs.list.length - 1];
   tabs.activeId = t.id;
   return t;
+}
+
+/** Replaces the result tabs after a run. `active` is the tab to show. */
+export function setResults(t: Tab, results: QueryResult[], active = results.length ? results.length - 1 : 0) {
+  t.results = results;
+  t.resultIndex = results.length ? Math.min(Math.max(active, 0), results.length - 1) : 0;
+  // Read the stored proxy, not the plain object: re-runs find their target by identity.
+  t.result = t.results[t.resultIndex] ?? null;
+}
+
+/** A re-run of one result (Load more, sort, refresh) updates that tab, not the whole set. */
+export function replaceResult(t: Tab, target: QueryResult, r: QueryResult) {
+  const i = t.results.indexOf(target);
+  if (i < 0) return false;
+  // The sort belongs to the result, so the replacement keeps it.
+  r.sort = target.sort;
+  t.results[i] = r;
+  if (t.resultIndex === i) t.result = t.results[i];
+  return true;
+}
+
+/** Replaces the result currently shown; used when the caller knows it is still active. */
+export function replaceActiveResult(t: Tab, r: QueryResult) {
+  const target = t.results[t.resultIndex];
+  if (target) {
+    replaceResult(t, target, r);
+    return;
+  }
+  t.results = [r];
+  t.resultIndex = 0;
+  t.result = t.results[0];
+}
+
+export function activateResult(t: Tab, i: number) {
+  if (!t.results[i] || t.resultIndex === i) return;
+  t.resultIndex = i;
+  t.result = t.results[i];
+  t.sort = t.result.sort;
+}
+
+/** Removes one result tab; the next one at that position becomes active. */
+export function closeResult(t: Tab, i: number) {
+  if (i < 0 || i >= t.results.length) return;
+  const idx = t.resultIndex;
+  t.results.splice(i, 1);
+  if (!t.results.length) {
+    t.result = null;
+    t.resultIndex = 0;
+    return;
+  }
+  // Closing right of the active tab must not move the cursor to that removed tab.
+  t.resultIndex = i < idx ? idx - 1 : i === idx ? Math.min(i, t.results.length - 1) : idx;
+  t.result = t.results[t.resultIndex];
+  t.sort = t.result.sort;
+}
+
+export function clearResults(t: Tab) {
+  t.results = [];
+  t.resultIndex = 0;
+  t.result = null;
 }
 
 /** Opens a table tab on `c`, or selects the tab that already shows this table. Returns the tab and if it is new. */

@@ -53,22 +53,69 @@ function uniqueNames(names: string[]) {
   });
 }
 
-/** The grid shows the last statement that returned columns (else the last one); the others go in `summary`. */
-export function toResult(run: QueryRun, mock: boolean, limit: number, database: string): QueryResult {
-  const st = run.statements;
-  let shown = st.length - 1;
-  for (let i = st.length - 1; i >= 0; i--) if (st[i].columns.length) { shown = i; break; }
-  const s = st[shown];
-  const summary = st.length > 1 ? st.map((x, i) => `${i + 1}. ${shortSql(x.sql)} — ${outcome(x)} · ${x.elapsedMs} ms${i === shown ? ' (shown)' : ''}`) : undefined;
-  const notices = run.notices?.length ? run.notices : undefined;
-  const base = { ms: run.elapsedMs, summary, notices, database, live: !mock };
-  if (!s.columns.length) {
-    const note = mock ? 'Statement ran (mock). 0 rows affected.' : `Statement ran. ${s.affected ?? 0} row${s.affected === 1 ? '' : 's'} affected.`;
-    return { ...base, columns: [], rows: [], note };
-  }
+/** One grid result for a statement that returned columns. */
+function rowResult(s: StatementResult, mock: boolean, limit: number, database: string): QueryResult {
   const columns = uniqueNames(s.columns.map((c) => c.name));
   const rows = s.rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] as Cell])));
-  // A multi-statement run is never re-run as a whole, so only a single read can page or export.
-  const isRead = st.length === 1 && s.isRead;
-  return { ...base, columns, types: s.columns.map((c) => c.dataType), rows, truncated: s.truncated, limit, isRead, sortable: isRead && s.sortable, table: s.table, sql: s.sql };
+  return {
+    columns,
+    types: s.columns.map((c) => c.dataType),
+    rows,
+    truncated: s.truncated,
+    limit,
+    isRead: s.isRead,
+    sortable: s.isRead && s.sortable,
+    table: s.table,
+    sql: s.sql,
+    ms: s.elapsedMs,
+    database,
+    live: !mock,
+  };
+}
+
+/**
+ * The result tabs of a run: one per statement that returned columns, plus one Messages tab for
+ * statements that changed rows or returned none. The active tab is the last grid result.
+ */
+export function toResults(run: QueryRun, mock: boolean, limit: number, database: string): { results: QueryResult[]; active: number } {
+  const results: QueryResult[] = [];
+  const messages: string[] = [];
+  let lastRow = -1;
+  for (const [i, s] of run.statements.entries()) {
+    if (s.columns.length) {
+      results.push(rowResult(s, mock, limit, database));
+      lastRow = results.length - 1;
+    } else {
+      messages.push(`${i + 1}. ${shortSql(s.sql)} — ${outcome(s)} · ${s.elapsedMs} ms`);
+    }
+  }
+  if (messages.length) {
+    const only = run.statements.length === 1 ? run.statements[0] : undefined;
+    const note = only
+      ? mock
+        ? 'Statement ran (mock). 0 rows affected.'
+        : `Statement ran. ${only.affected ?? 0} row${only.affected === 1 ? '' : 's'} affected.`
+      : `${run.statements.length} statements ran.`;
+    results.push({
+      columns: [],
+      rows: [],
+      ms: run.elapsedMs,
+      note,
+      title: only ? undefined : 'Messages',
+      summary: only ? undefined : messages,
+      database,
+      live: !mock,
+    });
+    if (lastRow < 0) lastRow = results.length - 1;
+  }
+  const notices = run.notices?.length ? run.notices : undefined;
+  const last = results.at(-1);
+  if (notices && last) last.notices = notices;
+  return { results, active: Math.max(0, lastRow) };
+}
+
+/** The active result of a run, as a single grid result. */
+export function toResult(run: QueryRun, mock: boolean, limit: number, database: string): QueryResult {
+  const { results, active } = toResults(run, mock, limit, database);
+  return results[active] ?? { columns: [], rows: [], ms: run.elapsedMs, note: 'Statement ran.' };
 }

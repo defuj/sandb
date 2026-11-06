@@ -7,7 +7,8 @@
   import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
   import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
   import { schemas, runMock, statementKind, nsOf, type QueryResult, type Row, type Schema } from './lib/mock';
-  import { toResult, snapshotSchema, snapshotKey } from './lib/results';
+  import { statementRanges } from './lib/sql/text';
+  import { toResult, toResults, snapshotSchema, snapshotKey } from './lib/results';
   import ConnectionTree from './lib/components/ConnectionTree.svelte';
   import ConnectionDialog from './lib/components/ConnectionDialog.svelte';
   import SqlEditor from './lib/components/SqlEditor.svelte';
@@ -28,7 +29,7 @@
   import { qualified, displayName, selectSql, insertSql, dangerSql, tableDataSql, type TableAction, type TableRef, type TableFilter, type Danger } from './lib/tableActions';
   import { logQuery } from './lib/audit.svelte';
   import { confirmDiscard, resetEdits } from './lib/edits.svelte';
-  import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, type Tab } from './lib/tabs.svelte';
+  import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, setResults, replaceResult, replaceActiveResult, activateResult, closeResult, clearResults, type Tab } from './lib/tabs.svelte';
   import { manualCommit, refreshStatus, endTx, leaveSession, settlePending, txPrompt } from './lib/tx.svelte';
   import PendingTxDialog from './lib/components/PendingTxDialog.svelte';
   import { updates, checkForUpdates } from './lib/updates.svelte';
@@ -331,6 +332,9 @@
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
     if (running[t.id] || (!again && !confirmDiscard())) return;
+    // A re-run keeps its target: switching or closing result tabs during the await must not
+    // move its rows into another Result tab.
+    const targetResult = again ? t.result : null;
     const sql = again?.sql ?? pick?.sql ?? (editor?.selection().trim() || t.query);
     const sort = again?.sort ?? pick?.sort;
     if (!again) t.sort = pick?.sort;
@@ -356,8 +360,18 @@
         }, 300)
       : undefined;
     let r: QueryResult;
+    let all: QueryResult[] | undefined;
+    let active = 0;
     try {
-      r = toResult(await api.runQuery({ connId: c.id, database: dbName, sql, queryId: id, limit, tabId: t.id, sort }), isMock, limit, dbName);
+      const queryRun = await api.runQuery({ connId: c.id, database: dbName, sql, queryId: id, limit, tabId: t.id, sort });
+      if (again) {
+        r = toResult(queryRun, isMock, limit, dbName);
+      } else {
+        const converted = toResults(queryRun, isMock, limit, dbName);
+        all = converted.results;
+        active = converted.active;
+        r = all[active] ?? { columns: [], rows: [], ms: queryRun.elapsedMs, note: 'Statement ran.' };
+      }
     } catch (e) {
       const err = ApiError.from(e);
       r = { columns: [], rows: [], ms: Date.now() - started, error: err.code === 'cancelled' ? 'Query cancelled' : err.message, live: !isMock };
@@ -366,9 +380,20 @@
       delete running[t.id];
       refreshStatus(t);
     }
-    t.result = r;
-    t.resultConn = c;
-    if (again) return;
+    if (again) {
+      if (targetResult) replaceResult(t, targetResult, r);
+      else replaceActiveResult(t, r);
+    } else if (all?.length) {
+      setResults(t, all, active);
+      t.resultConn = c;
+    } else {
+      setResults(t, [r], 0);
+      t.resultConn = c;
+    }
+    if (again) {
+      t.resultConn = c;
+      return;
+    }
     logQuery({
       kind: k === 'write' ? 'WRITE' : 'READ',
       source: 'You',
@@ -500,19 +525,47 @@
 
   function loadMore() {
     const r = tab.result;
-    if (r?.sql && r.limit && r.isRead && !r.summary) run({ sql: r.sql, limit: r.limit * 2, sort: tab.sort });
+    if (r?.sql && r.limit && r.isRead && !r.summary) run({ sql: r.sql, limit: r.limit * 2, sort: tab.table ? tab.sort : r.sort });
+  }
+
+  function resultLabel(t: Tab, r: QueryResult, i: number) {
+    if (r.title) return r.title;
+    return t.results.length > 1 ? `Result ${i + 1}` : (r.table ?? 'Results');
+  }
+
+  function resultTip(r: QueryResult, i: number) {
+    return r.title ?? r.table ?? r.sql?.replace(/\s+/g, ' ').slice(0, 120) ?? `Result ${i + 1}`;
+  }
+
+  /** Switching result tabs drops edit mode, like switching editor tabs. */
+  function openResult(t: Tab, i: number) {
+    if (t.resultIndex === i) return;
+    if (!confirmDiscard()) return;
+    activateResult(t, i);
+    resetEdits(true);
+  }
+
+  /** The X of one result tab; closing the last one hides the results pane. */
+  function dropResult(t: Tab, i: number) {
+    const active = i === t.resultIndex;
+    if (active && !confirmDiscard()) return;
+    closeResult(t, i);
+    if (active) resetEdits(true);
+    if (!t.results.length) ui.resultsOpen = false;
   }
 
   function sortResult(t: Tab, sort: ResultSort) {
     const r = t.result;
     if (!r?.sql || !r.sortable || r.summary || running[t.id] || !confirmDiscard()) return;
-    t.sort = sort;
+    // The sort belongs to the shown result, not to the editor tab.
+    if (t.table) t.sort = sort;
+    else r.sort = sort;
     run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort });
   }
 
   function refreshResult(t: Tab) {
     const r = t.result;
-    if (r?.sql) run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort: t.sort });
+    if (r?.sql) run({ sql: r.sql, limit: r.limit ?? DEFAULT_LIMIT, sort: t.table ? t.sort : r.sort });
   }
   function newConnection() {
     connEdit = null;
@@ -540,7 +593,7 @@
     if (c.id !== conn.id) return;
     resetEdits(true);
     if (!isMock) return openFirstTable();
-    if (tab.result?.sql) tab.result = runMock(tab.result.sql, schema, conn);
+    if (tab.result?.sql) replaceActiveResult(tab, runMock(tab.result.sql, schema, conn));
   }
 
   // Throws on a backend error; DeleteConnectionDialog shows it and keeps the connection.
@@ -558,7 +611,7 @@
     for (const t of tabs.list) {
       if (t.connId !== c.id) continue;
       if (next) setTabConn(t, next);
-      t.result = null;
+      clearResults(t);
       t.opened = null;
       // The backend dropped its session with the connection.
       t.status = null;
@@ -569,8 +622,8 @@
   function openFirstTable() {
     if (isMock) return openTable(tables[0]);
     // Real databases: nothing runs until the user opens a table or runs a query.
-    tab.result = null;
     tab.opened = null;
+    clearResults(tab);
   }
 
   /** Mock mode: runs the table in the active tab. `t`: a table name as the palette lists it. */
@@ -693,6 +746,32 @@
       if (c.engine !== 'sqlite') nt.database = dbOf(src, c);
     }
     return nt;
+  }
+
+  /** A Run from a chat code block: a new tab there, or the active editor tab the user picked. */
+  function chatRun(sql: string, src?: ChatSource, target: 'active' | 'new' = 'new') {
+    // Writes are inserted for review, never executed straight from an assistant reply.
+    const dialect = (src ? connOf(src)?.engine : conn.engine) ?? 'pg';
+    const hasWrite = statementRanges(sql, dialect).some(([from, to]) => statementKind(sql.slice(from, to)) === 'write');
+    if (hasWrite) {
+      ui.page = 'query';
+      chatInsert(sql, src);
+      return;
+    }
+    if (target === 'new') {
+      if (!confirmDiscard()) return;
+      ui.page = 'query';
+      chatTab(sql, src);
+      run(undefined, { sql });
+      return;
+    }
+    const t = tab;
+    if (t.table || running[t.id] || statementKind(sql) === 'empty' || !confirmDiscard()) return;
+    ui.page = 'query';
+    // Keep the query already in the tab; the new one goes below it with one blank line.
+    const current = t.query.trimEnd();
+    t.query = current ? `${current}\n\n${sql}` : sql;
+    run(undefined, { sql });
   }
 
   /** Appended to the active editor when it is on the step's database, else into a new tab there. */
@@ -952,7 +1031,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} {schema} {columnsOf} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />
@@ -970,16 +1049,37 @@
       </div>
 
       <div class="flex min-h-0 flex-1 flex-col border-t border-line">
-        <!-- Result tab strip (as in DBeaver): the tab names the source table; its X hides the results. -->
-        <div class="flex h-8 shrink-0 items-end border-b border-line px-1.5" role="tablist" aria-label="Results">
-          <div class="-mb-px flex h-7 items-center gap-1.5 rounded-t-md border border-b-0 border-line bg-surface pr-1 pl-2.5 text-[12.5px] font-medium text-ink" role="tab" aria-selected="true">
-            <Table2 size={13} class="text-accent" />
-            <span class="max-w-60 truncate">{tab.result?.table ?? 'Results'}</span>
-            <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={12} /></button>
-          </div>
+        <!-- Result tab strip (as in DBeaver): one tab per grid result; its X closes that result. -->
+        <div class="flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto border-b border-line px-1.5" role="tablist" aria-label="Results">
+          {#if tab.results.length}
+            {#each tab.results as r, i (i)}
+              {@const on = tab.resultIndex === i}
+              <div
+                class="-mb-px flex h-7 shrink-0 items-center gap-1.5 rounded-t-md border border-b-0 pr-1 pl-2.5 text-[12.5px] font-medium {on ? 'border-line bg-surface text-ink' : 'border-transparent text-muted hover:bg-hover hover:text-ink'}"
+                role="tab"
+                aria-selected={on}
+                title={resultTip(r, i)}
+                tabindex="0"
+                onclick={() => openResult(tab, i)}
+                onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openResult(tab, i); } }}
+              >
+                {#if r.title === 'Messages'}<ScrollText size={13} class="shrink-0 text-accent" />{:else}<Table2 size={13} class="shrink-0 text-accent" />{/if}
+                <span class="max-w-40 truncate">{resultLabel(tab, r, i)}</span>
+                <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Close result" aria-label="Close result" onclick={(e) => { e.stopPropagation(); dropResult(tab, i); }}><X size={12} /></button>
+              </div>
+            {/each}
+          {:else}
+            <div class="-mb-px flex h-7 items-center gap-1.5 rounded-t-md border border-b-0 border-line bg-surface pr-1 pl-2.5 text-[12.5px] font-medium text-ink" role="tab" aria-selected="true">
+              <Table2 size={13} class="text-accent" />
+              <span class="max-w-60 truncate">Results</span>
+              <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={12} /></button>
+            </div>
+          {/if}
         </div>
         <div class="relative min-h-0 flex-1">
-          <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} sort={tab.sort ?? null} onsort={(s) => sortResult(tab, s)} onloadmore={loadMore} onsaved={() => refreshResult(tab)} />
+          {#key `${tab.id}:${tab.resultIndex}:${tab.result?.sql ?? ''}:${tab.result?.title ?? ''}`}
+            <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} sort={tab.result?.sort ?? null} onsort={(s) => sortResult(tab, s)} onloadmore={loadMore} onsaved={() => refreshResult(tab)} />
+          {/key}
         </div>
       </div>
     </div>
@@ -997,7 +1097,7 @@
     <!-- Below 880 px the panel floats over the main card, so it has no gap to drag. -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div class="-mx-2 hidden w-2 shrink-0 cursor-col-resize rounded-full outline-none hover:bg-accent/25 focus-visible:bg-accent/40 min-[880px]:block" role="separator" aria-orientation="vertical" aria-label="Resize assistant" aria-valuenow={ui.chatWidth} aria-valuemin={280} aria-valuemax={640} tabindex="0" onpointerdown={resizeChat} onkeydown={keyChat}></div>
-    <ChatPanel {tables} onEnableWrites={(c) => (guardTarget = c)} onInsertSql={chatInsert} onRunSql={(s, src) => { chatTab(s, src); run(undefined, { sql: s }); }} />
+    <ChatPanel {tables} activeBusy={!!busy} onEnableWrites={(c) => (guardTarget = c)} onInsertSql={chatInsert} onRunSql={chatRun} />
   {/if}
   </div>
 </div>

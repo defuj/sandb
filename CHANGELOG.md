@@ -4,6 +4,12 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+- SQL code blocks in the assistant panel now have a Run button. Read blocks open a small menu with **Run in active tab** (adds the query below the current text, with one blank line) and **Run in a new tab** (on the database of the reply). Picking an item runs the query at once.
+- Write blocks are inserted into the editor instead of being executed. The menu says so and offers **Insert into editor**, so you can review the SQL and run it yourself. Non-SQL blocks keep Copy only.
+- The menu shows whether the block reads or writes and how many statements it holds. Each Run choice shows the database and environment it will use.
+- A run with several statements now gets one **Result** tab per statement that returns rows, plus a **Messages** tab for writes. Each result tab can be closed on its own; the last one hides the results pane.
+- The editor has a small Run button in the gutter at the first line of each statement, like DBeaver's execute-statement action. It runs only that statement and leaves the editor text unchanged; ⇧⌘↵ runs the statement at the cursor from the keyboard.
+
 ## [0.7.3] - 2026-11-05
 
 - Fixed: the SQL editor did not always show the cursor in the macOS app. Now the editor draws the cursor itself, so you can always see it.

@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { ArrowUp, Square, ShieldCheck, ShieldOff, Ban, LoaderCircle, Clock, Check, X, Copy, Sparkles, History, SquarePen, Trash2, MessageCircleQuestion, TriangleAlert, ArrowLeft, ChevronRight, RotateCw, Table2, FileCode, FileSpreadsheet, Braces, ChartColumn, FileDown, ListCollapse, ListTree, Info } from '@lucide/svelte';
+  import { ArrowUp, Square, ShieldCheck, ShieldOff, Ban, LoaderCircle, Clock, Check, X, Copy, Sparkles, History, SquarePen, Trash2, MessageCircleQuestion, TriangleAlert, ArrowLeft, ChevronRight, RotateCw, Table2, FileCode, FileSpreadsheet, Braces, ChartColumn, FileDown, ListCollapse, ListTree, Info, Play, SquarePlus } from '@lucide/svelte';
   import Markdown from './Markdown.svelte';
   import ChartView from './ChartView.svelte';
   import ChatScope from './ChatScope.svelte';
   import ModelPicker from './ModelPicker.svelte';
-  import { chat, send, current, sessionsByDate, openSession, deleteSession, decide, answer, rerun, scopeOf, setScope, connOf, dbOf, type Part, type ToolPart, type Source } from '../chat.svelte';
+  import { chat, send, current, sessionsByDate, openSession, deleteSession, decide, answer, rerun, scopeOf, setScope, connOf, dbOf, type Part, type ToolPart, type Source, type Msg } from '../chat.svelte';
+  import { activeTab } from '../tabs.svelte';
   import { sqlHtml } from '../highlight';
+  import { statementRanges } from '../sql/text';
   import { api, ApiError } from '../api';
   import { replyPdf, pdfName } from '../report';
   import { ui, ai, engines, envTag, type Conn } from '../state.svelte';
   import { csvCell, formatCell } from '../results';
-  import type { Row } from '../mock';
+  import { statementKind, type Row } from '../mock';
 
   const session = $derived(current());
   const messages = $derived(session?.messages ?? []);
@@ -29,7 +31,122 @@
     return c.engine === 'sqlite' ? c.name : `${c.name} / ${dbOf(s, c)}`;
   }
 
-  let { tables = [], onEnableWrites, onInsertSql, onRunSql }: { tables?: string[]; onEnableWrites: (c: Conn) => void; onInsertSql: (sql: string, source?: Source) => void; onRunSql: (sql: string, source?: Source) => void } = $props();
+  let { tables = [], activeBusy = false, onEnableWrites, onInsertSql, onRunSql }: { tables?: string[]; activeBusy?: boolean; onEnableWrites: (c: Conn) => void; onInsertSql: (sql: string, source?: Source) => void; onRunSql: (sql: string, source?: Source, target?: 'active' | 'new') => void } = $props();
+
+  const active = $derived(activeTab());
+  const activeConn = $derived(active ? connOf({ connId: active.connId, database: active.database }) : undefined);
+  /** A SQL code block in the chat, with the screen position of its Run button. */
+  type RunMenu = { sql: string; source?: Source; kind: 'read' | 'write'; count: number; x: number; y: number; anchor: HTMLElement };
+  let runMenu = $state<RunMenu | null>(null);
+  const menuConn = $derived(runMenu?.source ? connOf(runMenu.source) : undefined);
+  const activeReady = $derived(!!active && !active.table && !activeBusy);
+  const newReady = $derived(!!runMenu?.source && !!menuConn);
+  const insertReady = $derived(!!active || newReady);
+
+  /** The database of the reply: its last data step, else the active editor, else the only chat database. */
+  function replySource(m: Msg): Source | undefined {
+    for (let i = m.parts.length - 1; i >= 0; i--) {
+      const p = m.parts[i];
+      if (p.kind === 'tool' && p.source) return p.source;
+    }
+    if (active) return { connId: active.connId, database: active.database };
+    return scope.length === 1 ? scope[0] : undefined;
+  }
+
+  /** Opens the small Run menu under the code block's button; picking an item runs at once. */
+  function openRunMenu(sql: string, anchor: HTMLElement, source?: Source) {
+    if (runMenu?.anchor === anchor) {
+      closeRunMenu();
+      return;
+    }
+    const kind = statementKind(sql);
+    if (kind === 'empty') return;
+    const src = source ?? (active ? { connId: active.connId, database: active.database } : undefined);
+    const c = src ? connOf(src) : activeConn;
+    const parts = statementRanges(sql, c?.engine ?? 'pg').filter(([from, to]) => sql.slice(from, to).trim());
+    if (!parts.length) return;
+    const anyWrite = parts.some(([from, to]) => statementKind(sql.slice(from, to)) === 'write');
+    const r = anchor.getBoundingClientRect();
+    const width = 264;
+    // A write menu has one warning line and one item instead of two run items.
+    const height = anyWrite ? 176 : 132;
+    const x = Math.max(8, Math.min(r.right - width, innerWidth - width - 8));
+    const y = r.bottom + height + 8 > innerHeight ? Math.max(8, r.top - height - 8) : r.bottom + 8;
+    runMenu = { sql, source: src, kind: anyWrite ? 'write' : 'read', count: parts.length, x, y, anchor };
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.run-menu [role="menuitem"]:not([disabled])')?.focus());
+  }
+
+  function closeRunMenu(refocus = true) {
+    const a = runMenu?.anchor;
+    runMenu = null;
+    if (refocus) a?.focus();
+  }
+
+  function runFromMenu(target: 'active' | 'new') {
+    const m = runMenu;
+    if (!m) return;
+    runMenu = null;
+    if (m.kind === 'write') {
+      onInsertSql(m.sql, m.source);
+      return;
+    }
+    onRunSql(m.sql, m.source, target);
+  }
+
+  /** Writes are never executed from chat; insert them so the user can review and run them. */
+  function insertFromMenu() {
+    const m = runMenu;
+    if (!m) return;
+    runMenu = null;
+    onInsertSql(m.sql, m.source);
+  }
+
+  function activeHint() {
+    if (!active) return 'No query tab';
+    if (active.table) return 'The active tab shows a table';
+    if (activeBusy) return 'The active tab is running a query';
+    const where = sourceLabel({ connId: active.connId, database: active.database });
+    const env = activeConn ? ` · ${activeConn.env}` : '';
+    return active.query.trim() ? `${active.title} · ${where}${env} · appends below` : `${active.title} · ${where}${env} · empty`;
+  }
+
+  function newHint() {
+    if (!runMenu?.source) return 'No database is available';
+    if (!menuConn) return 'The connection is missing';
+    return `${sourceLabel(runMenu.source)} · ${menuConn.env}`;
+  }
+
+  function insertHint() {
+    if (!active) return 'No query tab';
+    if (active.table) return 'Opens a new tab';
+    if (runMenu?.source && (active.connId !== runMenu.source.connId || active.database !== dbOf(runMenu.source))) return 'A different database · opens a new tab';
+    return active.query.trim() ? `${active.title} · appends below` : `${active.title} · empty`;
+  }
+
+  $effect(() => {
+    if (!runMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeRunMenu();
+      }
+    };
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as Element;
+      if (!el.closest('.run-menu') && !el.closest('.code-run')) closeRunMenu(false);
+    };
+    const onScroll = () => closeRunMenu(false);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  });
 
   let input = $state('');
   let showHistory = $state(false);
@@ -329,7 +446,7 @@
             {#if b.kind === 'part'}
             {@const p = b.p}
             {#if p.kind === 'text'}
-              <Markdown text={p.text} />
+              <Markdown text={p.text} onrunsql={(sql, anchor) => openRunMenu(sql, anchor, replySource(m))} />
             {:else if p.kind === 'chart'}
               <ChartView part={p} />
             {:else if p.kind === 'question'}
@@ -615,5 +732,57 @@
     </div>
   </div>
 </section>
+
+{#if runMenu}
+  <div class="popover run-menu fixed z-[60] w-[264px] p-1" style:left="{runMenu.x}px" style:top="{runMenu.y}px" role="menu" aria-label="Run query">
+    <div class="flex items-center gap-1.5 px-2 pt-1.5 pb-1 text-[10.5px]">
+      <span class="font-mono font-semibold {runMenu.kind === 'write' ? 'text-amber-700 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400'}">{runMenu.kind === 'write' ? 'WRITE' : 'READ'}</span>
+      {#if runMenu.count > 1}<span class="shrink-0 text-faint">{runMenu.count} statements</span>{/if}
+    </div>
+    {#if runMenu.kind === 'write'}
+      <p class="px-2 pb-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">Writes are not run from chat. Insert, review, then run them in the editor.</p>
+      <button
+        type="button"
+        role="menuitem"
+        class="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-hover focus:bg-hover focus:outline-none disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent"
+        disabled={!insertReady}
+        onclick={insertFromMenu}
+      >
+        <FileCode size={13} class="mt-0.5 shrink-0" />
+        <span class="min-w-0 flex-1">
+          <span class="block text-[12.5px] text-ink">Insert into editor</span>
+          <span class="block truncate text-[11px] text-faint">{insertHint()}</span>
+        </span>
+      </button>
+    {:else}
+      <button
+        type="button"
+        role="menuitem"
+        class="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-hover focus:bg-hover focus:outline-none disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent"
+        disabled={!activeReady}
+        onclick={() => runFromMenu('active')}
+      >
+        <Play size={13} class="mt-0.5 shrink-0" />
+        <span class="min-w-0 flex-1">
+          <span class="block text-[12.5px] text-ink">Run in active tab</span>
+          <span class="block truncate text-[11px] text-faint">{activeHint()}</span>
+        </span>
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-hover focus:bg-hover focus:outline-none disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent"
+        disabled={!newReady}
+        onclick={() => runFromMenu('new')}
+      >
+        <SquarePlus size={13} class="mt-0.5 shrink-0" />
+        <span class="min-w-0 flex-1">
+          <span class="block text-[12.5px] text-ink">Run in a new tab</span>
+          <span class="block truncate text-[11px] text-faint">{newHint()}</span>
+        </span>
+      </button>
+    {/if}
+  </div>
+{/if}
 
 <svelte:window onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'h') { e.preventDefault(); toggleSteps(); } }} />

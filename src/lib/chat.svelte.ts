@@ -407,8 +407,9 @@ const find = (tables: string[], name: string) => tables.find((t) => t.toLowerCas
 async function reply(msg: Msg, text: string, conn: Conn) {
   const schema = schemas[conn.schema];
   const tables = Object.keys(schema);
+  const wantsSqlBlock = /\bsql\s+(?:block|code|snippet)\b/i.test(text);
 
-  if (WRITE.test(text)) {
+  if (WRITE.test(text) && !wantsSqlBlock) {
     const t1 = await tool(msg, { kind: 'tool', name: 'describe_table', sql: tables[0], status: 'running' }, 500);
     finish(t1);
     t1.note = `${schema[tables[0]].length} columns · 48,210 rows`;
@@ -434,6 +435,21 @@ async function reply(msg: Msg, text: string, conn: Conn) {
       logQuery({ conn, kind: 'WRITE', source: 'AI', sql, result: ok ? { status: 'ok', rows: 214 } : { status: 'denied' }, ms: ok ? 296 : 0 });
       await stream(msg, ok ? 'Done. I deleted 214 cancelled orders inside one transaction. The change is in the audit log.' : 'OK, I did not run it. The data is unchanged.');
     }
+    return;
+  }
+
+  // Mock only: an answer with a SQL code block, to exercise the Run menu in the chat.
+  if (/\bjson\s+(?:block|code)\b/i.test(text)) {
+    await stream(msg, 'Here is the payload:\n\n```json\n{"status":"paid","orders":3}\n```\n\nCopy it or use it as a reference.');
+    return;
+  }
+  if (wantsSqlBlock) {
+    const write = /\b(?:update|delete|insert|drop|write)\b/i.test(text);
+    const sql = write
+      ? "UPDATE public.orders\nSET status = 'paid'\nWHERE id = 1;"
+      : 'SELECT *\nFROM public.orders\nLIMIT 10;';
+    const tail = write ? 'Use Insert into editor to review it before running.' : 'Pick Run to execute it.';
+    await stream(msg, `Here is the query:\n\n\`\`\`sql\n${sql}\n\`\`\`\n\n${tail}`);
     return;
   }
 
