@@ -8,7 +8,11 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 - Write blocks are inserted into the editor instead of being executed. The menu says so and offers **Insert into editor**, so you can review the SQL and run it yourself. Non-SQL blocks keep Copy only.
 - The menu shows whether the block reads or writes and how many statements it holds. Each Run choice shows the database and environment it will use.
 - A run with several statements now gets one **Result** tab per statement that returns rows, plus a **Messages** tab for writes. Each result tab can be closed on its own; the last one hides the results pane.
-- The editor has a small Run button in the gutter at the first line of each statement, like DBeaver's execute-statement action. It runs only that statement and leaves the editor text unchanged; ⇧⌘↵ runs the statement at the cursor from the keyboard.
+- The editor has a small Run button in the gutter at the first line of each statement, like DBeaver's execute-statement action. It runs only that statement and leaves the editor text unchanged.
+- ⇧⌘↵ runs the query like ⌘↵, but the results open in new result tabs. The result tabs of earlier runs stay open.
+- The red notice above the results footer, for example "Only a simple single-table SELECT with plain columns or * is editable", now closes by itself after 4 seconds. A notice about a failed save on a row stays until you close it.
+- After an update, the first start shows a "What's new" dialog with the changes since the last version you opened. "Got it" or Esc closes it, and it does not open again for that version.
+- The release notes on GitHub now show the changes of that version from this changelog. Before, they only said "See CHANGELOG.md".
 
 ## [0.7.3] - 2026-11-05
 

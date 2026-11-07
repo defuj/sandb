@@ -32,7 +32,8 @@
   import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, setResults, replaceResult, replaceActiveResult, activateResult, closeResult, clearResults, type Tab } from './lib/tabs.svelte';
   import { manualCommit, refreshStatus, endTx, leaveSession, settlePending, txPrompt } from './lib/tx.svelte';
   import PendingTxDialog from './lib/components/PendingTxDialog.svelte';
-  import { updates, checkForUpdates } from './lib/updates.svelte';
+  import WhatsNewDialog from './lib/components/WhatsNewDialog.svelte';
+  import { updates, checkForUpdates, showWhatsNew } from './lib/updates.svelte';
 
   const isMock = api.kind === 'mock';
   // The overlay title bar puts the macOS window buttons over the top-left corner.
@@ -42,6 +43,7 @@
   // Never undefined: closing the last tab opens a fresh one.
   const tab = $derived(activeTab()!);
   checkForUpdates(true);
+  showWhatsNew();
 
   let guardTarget = $state<Conn | null>(null);
   let connDialog = $state(false);
@@ -327,8 +329,9 @@
   /**
    * Runs the selection, or the whole editor. `again` re-runs the shown result with a higher limit.
    * `pick` runs the given SQL instead; with `script` (a file name) the toolbar shows statement progress.
+   * With `append` the results open as new result tabs after the current ones.
    */
-  async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql: string; script?: string; sort?: ResultSort }) {
+  async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql?: string; script?: string; sort?: ResultSort; append?: boolean }) {
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
     if (running[t.id] || (!again && !confirmDiscard())) return;
@@ -383,11 +386,10 @@
     if (again) {
       if (targetResult) replaceResult(t, targetResult, r);
       else replaceActiveResult(t, r);
-    } else if (all?.length) {
-      setResults(t, all, active);
-      t.resultConn = c;
     } else {
-      setResults(t, [r], 0);
+      const fresh = all?.length ? all : [r];
+      if (pick?.append) setResults(t, [...t.results, ...fresh], t.results.length + (all?.length ? active : 0));
+      else setResults(t, fresh, all?.length ? active : 0);
       t.resultConn = c;
     }
     if (again) {
@@ -1031,7 +1033,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunnew={() => run(undefined, { append: true })} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />
@@ -1123,6 +1125,7 @@
 <DeleteConnectionDialog bind:target={connDelete} ondelete={deleteConnection} />
 <TableDangerDialog bind:target={danger} onconfirm={runDanger} />
 <SaveQueryDialog bind:ask={saveAsk} onsave={confirmSave} />
+<WhatsNewDialog />
 {#if notice}
   {@const n = notice}
   <div class="popover fixed bottom-3 left-3 z-50 flex max-w-md items-start gap-2 px-3 py-2 text-[12.5px] {n.ok ? 'text-ink' : 'text-red-700 dark:text-red-300'}" role={n.ok ? 'status' : 'alert'}>

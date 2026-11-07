@@ -30,8 +30,9 @@ sandb uses Semantic Versioning (`MAJOR.MINOR.PATCH`). `package.json` holds the o
    git push origin main v0.2.0
    ```
 
-4. GitHub Actions (`.github/workflows/release.yml`) builds the app and publishes the release. The workflow stops if the tag does not match `package.json`.
+4. GitHub Actions (`.github/workflows/release.yml`) builds the app and publishes the release. The workflow stops if the tag does not match `package.json`, or if `CHANGELOG.md` has no `## [x.y.z]` section for the tag. The items of that section become the release notes on GitHub and in `latest.json`.
 5. Installed apps see the update at the next start, or with Settings > Updates > Check for updates.
+6. On the first start after the update, the app shows a "What's new" dialog with the `CHANGELOG.md` sections from the last version that was opened up to the new version. The app bundles `CHANGELOG.md` at build time, so a section must exist before the build.
 
 ## Local build
 

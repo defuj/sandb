@@ -13,6 +13,7 @@
   let {
     value = $bindable(''),
     onrun,
+    onrunnew,
     onrunstatement,
     schema = {},
     dialect = 'pg',
@@ -20,6 +21,8 @@
   }: {
     value?: string;
     onrun?: () => void;
+    /** Like `onrun`, but the results open in new result tabs. */
+    onrunnew?: () => void;
     /** Runs one statement from the Run gutter, without changing the editor text. */
     onrunstatement?: (sql: string) => void;
     schema?: Record<string, string[]>;
@@ -162,7 +165,7 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'cm-statement-run';
-      b.title = 'Run this statement (⇧⌘↵)';
+      b.title = 'Run this statement';
       b.setAttribute('aria-label', 'Run this statement');
       b.tabIndex = -1;
       b.innerHTML = runIcon;
@@ -268,16 +271,7 @@
           history(),
           keymap.of([
             { key: 'Mod-Enter', run: () => (onrun?.(), true) },
-            // Keyboard counterpart of the gutter play button.
-            {
-              key: 'Mod-Shift-Enter',
-              run: () => {
-                const sql = statementAt();
-                if (!sql || !onrunstatement) return false;
-                onrunstatement(sql);
-                return true;
-              },
-            },
+            { key: 'Mod-Shift-Enter', run: () => (onrunnew?.(), true) },
             ...defaultKeymap,
             ...historyKeymap,
           ]),
