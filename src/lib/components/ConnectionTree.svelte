@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ChevronRight, Table2, Plus, Layers, KeyRound, Columns2, Database, Pencil, Copy, Trash, Ellipsis, LoaderCircle, RotateCw, Eye, ScanEye, ListTree, Lock, Hash, FileCode, FileSearch, FilePlus, Download, Sheet, Eraser } from '@lucide/svelte';
   import { untrack } from 'svelte';
-  import { db, active, engines, envDot, canWrite, type Conn } from '../state.svelte';
+  import { db, active, engines, envDot, envTag, canWrite, type Conn } from '../state.svelte';
   import { schemas, nsOf, pkOf, colType } from '../mock';
   import { api, ApiError, type ColumnInfo, type TableInfo, type TableKind } from '../api';
   import { displayName, kindLabel, type TableAction, type TableRef } from '../tableActions';
@@ -437,7 +437,7 @@
     <button
       class="flex h-7 w-full items-center gap-2 rounded-md pr-2 text-left text-[13px] {isActive ? 'font-medium text-ink' : 'text-muted hover:text-ink'} {menuOn ? 'bg-active' : 'hover:bg-hover'}"
       style={pad(0)}
-      title="{c.name} · {c.version} · {c.env}{canWrite(c) ? '' : ' · read-only'}"
+      title="{c.name} · {c.version} · Environment: {c.env}{canWrite(c) ? '' : ' · read-only'}"
       aria-expanded={!!open[c.id]}
       onclick={(e) => { if (e.detail > 1) return; open[c.id] ? (open[c.id] = false) : expand(c); }}
       oncontextmenu={(e) => openMenu(e, c)}
@@ -449,7 +449,7 @@
       <!-- Hidden on hover: the actions button covers that corner. The row title and the sr-only text above carry the same facts. -->
       <span class="flex shrink-0 items-center gap-2 {menuOn ? 'invisible' : 'group-focus-within:invisible group-hover:invisible'}">
         {#if !canWrite(c)}<Lock size={11} class="text-faint" aria-hidden="true" />{/if}
-        <span class="size-1.5 rounded-full {envDot[c.env]}" aria-hidden="true"></span>
+        {#if c.env === 'production'}<span class="tag {envTag.production}" aria-hidden="true">production</span>{:else}<span class="size-1.5 rounded-full {envDot[c.env]}" aria-hidden="true"></span>{/if}
       </span>
     </button>
     <button

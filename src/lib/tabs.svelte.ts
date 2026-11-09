@@ -35,8 +35,6 @@ export interface Tab {
 // state.svelte.ts imports this module too; neither touches the other at load time, so the cycle is safe.
 export const tabs = $state({ list: [] as Tab[], activeId: '' });
 
-let seq = 0;
-
 export const defaultDb = (c: Conn) => (c.engine === 'sqlite' ? 'main' : c.database);
 
 export function activeTab(): Tab | undefined {
@@ -49,13 +47,21 @@ export function setTabConn(t: Tab, c: Conn) {
   t.database = defaultDb(c);
 }
 
+/** The lowest N no open tab uses as "Query N". */
+function nextQueryTitle(): string {
+  const used = new Set(tabs.list.map((t) => /^Query (\d+)$/.exec(t.title)?.[1]).filter(Boolean).map(Number));
+  let n = 1;
+  while (used.has(n)) n++;
+  return `Query ${n}`;
+}
+
 /** Opens a tab on the active tab's connection and database, and makes it active. */
-export function newTab(query = ''): Tab {
+export function newTab(query = '', title = nextQueryTitle()): Tab {
   const c = active();
   const from = activeTab();
   tabs.list.push({
     id: crypto.randomUUID(),
-    title: `Query ${++seq}`,
+    title,
     connId: from?.connId ?? c.id,
     database: from?.database ?? defaultDb(c),
     query,
@@ -143,11 +149,10 @@ export function openTableTab(c: Conn, t: TableRef): { tab: Tab; created: boolean
     tabs.activeId = same.id;
     return { tab: same, created: false };
   }
-  const nt = newTab();
+  const nt = newTab('', t.name);
   nt.connId = c.id;
   nt.database = c.engine === 'sqlite' ? 'main' : t.database;
   nt.resultConn = c;
-  nt.title = t.name;
   nt.table = t;
   return { tab: nt, created: true };
 }
@@ -161,9 +166,8 @@ export function closeTab(id: string) {
   const i = tabs.list.findIndex((t) => t.id === id);
   if (i < 0) return;
   if (tabs.list.length === 1) {
-    seq = 0;
     tabs.activeId = id;
-    newTab();
+    newTab('', 'Query 1');
     tabs.list.splice(i, 1);
     return;
   }

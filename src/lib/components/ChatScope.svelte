@@ -70,7 +70,7 @@
     {@const c = connOf(s)}
     <span class="flex h-6 max-w-full min-w-0 items-center gap-1 rounded-md border border-line bg-surface pr-0.5 pl-1.5 text-[11.5px]" title={c ? `${c.name}${c.engine === 'sqlite' ? '' : ` / ${dbOf(s, c)}`} (${c.env})` : 'This connection was deleted'}>
       {#if c}
-        <span class="size-1.5 shrink-0 rounded-full {envDot[c.env]}"></span>
+        <span class="size-1.5 shrink-0 rounded-full {envDot[c.env]}" title={c.env}></span><span class="sr-only">{c.env}</span>
         <span class="min-w-0 truncate text-ink">{c.name}</span>
         {#if c.engine !== 'sqlite'}<span class="text-faint">/</span><span class="min-w-0 truncate font-mono text-muted">{dbOf(s, c)}</span>{/if}
       {:else}

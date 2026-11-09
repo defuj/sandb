@@ -46,7 +46,7 @@
 
   const items = $derived<Item[]>([
     { id: 'a-new', group: 'Actions', label: 'New query / focus editor', icon: FileCode, run: onfocuseditor },
-    { id: 'a-run', group: 'Actions', label: 'Run query', icon: Play, hint: '⌘↵', run: onrun },
+    { id: 'a-run', group: 'Actions', label: 'Run statement at cursor', icon: Play, hint: '⌘↵', run: onrun },
     { id: 'a-save', group: 'Actions', label: 'Save query', icon: Save, hint: '⌘S', run: onsave },
     { id: 'a-chat', group: 'Actions', label: 'Toggle AI chat', icon: PanelRight, run: ontogglechat },
     { id: 'a-sidebar', group: 'Actions', label: 'Toggle sidebar', icon: PanelLeft, run: ontogglesidebar },

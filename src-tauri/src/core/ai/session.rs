@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::ai::client::{AiClient, Completion};
+use crate::core::ai::client::{AiClient, Completion, StreamEvent};
 use crate::core::ai::prompt::{self, PromptInput};
 use crate::core::ai::settings;
 use crate::core::ai::tools::{self, ToolContext};
@@ -74,6 +74,11 @@ pub struct ChatRequest {
 pub enum ChatEvent {
     Text {
         delta: String,
+    },
+    /// The model has begun a tool call; its arguments are still streaming. Once per call,
+    /// before that call's `tool_call`.
+    ToolStarting {
+        name: String,
     },
     ToolCall {
         id: String,
@@ -317,9 +322,14 @@ async fn converse(
     };
     for _ in 0..MAX_STEPS {
         let answer: Completion = client
-            .chat_stream(&body, token, |delta| {
-                emit(ChatEvent::Text {
-                    delta: delta.to_string(),
+            .chat_stream(&body, token, |ev| {
+                emit(match ev {
+                    StreamEvent::Text(delta) => ChatEvent::Text {
+                        delta: delta.to_string(),
+                    },
+                    StreamEvent::ToolStarting(name) => ChatEvent::ToolStarting {
+                        name: name.to_string(),
+                    },
                 })
             })
             .await?;
@@ -585,6 +595,13 @@ mod tests {
             serde_json::to_value(ChatEvent::Done).unwrap(),
             json!({"type": "done"})
         );
+        assert_eq!(
+            serde_json::to_value(ChatEvent::ToolStarting {
+                name: "run_read_query".into()
+            })
+            .unwrap(),
+            json!({"type": "tool_starting", "name": "run_read_query"})
+        );
     }
 
     #[test]
@@ -667,6 +684,15 @@ mod tests {
             .filter(|e| matches!(e, ChatEvent::ToolResult { ok: true, .. }))
             .count();
         assert_eq!(results, MAX_STEPS);
+        // Each step: the name while the call streams, then the call, then its result.
+        assert!(matches!(
+            &events[..3],
+            [
+                ChatEvent::ToolStarting { name },
+                ChatEvent::ToolCall { name: n2, .. },
+                ChatEvent::ToolResult { ok: true, .. },
+            ] if name == "list_tables" && n2 == "list_tables"
+        ));
         let mut calls = 0;
         while reqs.try_recv().is_ok() {
             calls += 1;

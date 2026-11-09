@@ -23,11 +23,11 @@
   const copyIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
   const checkIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
   const playIcon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
-  /** A code block with its actions. The SQL action set adds Run; other languages only copy. */
-  const codeBox = (run: boolean) =>
-    `<div class="code-box"><span class="code-actions"><button type="button" class="code-copy" title="Copy code" aria-label="Copy code">${copyIcon}</button>` +
+  /** A code block with its actions. The SQL action set adds Run; other languages only copy. SQL wraps, so its `pre` is marked. */
+  const codeBox = (sql: boolean, run: boolean) =>
+    `<div class="code-box${run ? ' code-box-run' : ''}"><span class="code-actions"><button type="button" class="code-copy" title="Copy code" aria-label="Copy code">${copyIcon}</button>` +
     (run ? `<button type="button" class="code-run" title="Run query" aria-label="Run query" aria-haspopup="menu">${playIcon}</button>` : '') +
-    '</span><pre>';
+    `</span><pre${sql ? ' class="code-sql"' : ''}>`;
   // Placeholders keep the second replaceAll from wrapping the <pre> of the first one.
   const SQL_PRE = '\u0001sql-pre\u0001';
   const CODE_PRE = '\u0001code-pre\u0001';
@@ -40,8 +40,8 @@
       .replaceAll('</table>', '</table></div>')
       .replaceAll('<pre class="sql-code">', SQL_PRE)
       .replaceAll('<pre>', CODE_PRE)
-      .replaceAll(SQL_PRE, codeBox(!!onrunsql))
-      .replaceAll(CODE_PRE, codeBox(false))
+      .replaceAll(SQL_PRE, codeBox(true, !!onrunsql))
+      .replaceAll(CODE_PRE, codeBox(false, false))
       .replaceAll('</pre>', '</pre></div>'),
   );
 
@@ -117,7 +117,10 @@
   }
   .chat-markdown :global(pre) :global(code) { background: transparent; padding: 0; font-size: 11.5px; line-height: 1.6; }
   .chat-markdown :global(.code-box) { position: relative; margin: 0 0 10px; }
-  .chat-markdown :global(.code-box) > :global(pre) { margin: 0; }
+  .chat-markdown :global(.code-box) > :global(pre) { margin: 0; padding-right: 38px; }
+  .chat-markdown :global(.code-box-run) > :global(pre) { padding-right: 66px; }
+  /* SQL wraps like the step SQL, so no text hides past the edge or under the buttons. */
+  .chat-markdown :global(pre.code-sql) { white-space: pre-wrap; overflow-wrap: anywhere; }
   .chat-markdown :global(.code-actions) {
     position: absolute;
     top: 5px;

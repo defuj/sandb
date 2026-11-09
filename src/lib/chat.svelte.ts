@@ -32,9 +32,12 @@ export type ErrorPart = { kind: 'error'; text: string };
 /** A chart of a `render_chart` read. `rows` are arrays in `columns` order. `truncated`: the read had more rows than the chart keeps. */
 export type ChartPart = { kind: 'chart'; spec: ChartSpec; columns: string[]; rows: CellValue[][]; truncated: boolean };
 export type Part = { kind: 'text'; text: string } | ToolPart | QuestionPart | ErrorPart | ChartPart;
+/** `started`/`ended`: when the assistant reply was sent and when it finished, stopped or failed (missing in chats saved before they were kept). */
 export interface Msg {
   role: 'user' | 'assistant';
   parts: Part[];
+  started?: number;
+  ended?: number;
 }
 /** A database of a chat. `database` null: the connection's own database (chats saved before a chat had several databases). */
 export interface Source {
@@ -94,6 +97,8 @@ export const chat = $state({
   question: null as null | { resolve: (answer: string | null) => void },
   /** Stops the running live reply; null when there is nothing to stop. */
   cancel: null as null | (() => void),
+  /** A tool the model has started to call; its arguments still stream. null when there is none. */
+  starting: null as string | null,
 });
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -252,13 +257,14 @@ export async function send(text: string) {
   s.updated = Date.now();
   const history = historyOf(s.messages);
   s.messages.push({ role: 'user', parts: [{ kind: 'text', text }] });
-  s.messages.push({ role: 'assistant', parts: [] });
+  s.messages.push({ role: 'assistant', parts: [], started: Date.now() });
   const msg = s.messages[s.messages.length - 1];
   try {
     if (api.kind === 'mock') await reply(msg, text, connOf(sources[0])!);
     else await liveReply(msg, text, sources, history);
   } finally {
-    chat.live = chat.pending = chat.question = chat.cancel = null;
+    msg.ended = Date.now();
+    chat.live = chat.pending = chat.question = chat.cancel = chat.starting = null;
   }
 }
 
@@ -325,7 +331,11 @@ async function liveReply(msg: Msg, text: string, sources: Source[], history: Cha
         else msg.parts.push({ kind: 'text', text: e.delta });
         break;
       }
+      case 'tool_starting':
+        chat.starting = e.name;
+        break;
       case 'tool_call': {
+        if (chat.starting === e.name) chat.starting = null;
         const sql = typeof e.args.sql === 'string' ? e.args.sql : typeof e.args.table === 'string' ? e.args.table : undefined;
         const started = Date.now();
         const i = sourceIn(e.args);
