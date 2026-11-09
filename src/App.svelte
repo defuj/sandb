@@ -4,7 +4,7 @@
   import { tick, untrack } from 'svelte';
   import { ui, db, active, envTag, type Conn } from './lib/state.svelte';
   import { look, backdropOn, toggleTheme } from './lib/appearance.svelte';
-  import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
+  import { connOf, dbOf, openChatOnTab, type Source as ChatSource } from './lib/chat.svelte';
   import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
   import { schemas, runMock, statementKind, nsOf, type QueryResult, type Row, type Schema } from './lib/mock';
   import { appendStatement, statementRanges } from './lib/sql/text';
@@ -1010,8 +1010,8 @@
         {#if tabClean}<Check size={14} class="text-emerald-600 dark:text-emerald-400" />{:else}<Save size={14} />{/if}
         <span class="hidden xl:inline">{tabClean ? 'Saved' : 'Save'}</span>
       </button>
-      <!-- With the chat already open this only repeats it, so narrow toolbars drop it. -->
-      <button class="btn btn-ghost shrink-0 px-2 2xl:px-2.5 {ui.chatOpen ? 'hidden lg:inline-flex' : ''}" onclick={() => (ui.chatOpen = true)} title="Explain with AI"><Sparkles size={14} /> <span class="hidden 2xl:inline">Explain with AI</span></button>
+      <!-- Opens the chat on this tab's database. With the chat already open, narrow toolbars drop it. -->
+      <button class="btn btn-ghost shrink-0 px-2 2xl:px-2.5 {ui.chatOpen ? 'hidden lg:inline-flex' : ''}" onclick={openChatOnTab} title="Explain with AI"><Sparkles size={14} /> <span class="hidden 2xl:inline">Explain with AI</span></button>
       {#if busy}
         {#if busy.script}
           {@const s = busy.script}
@@ -1035,7 +1035,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunnew={() => run(undefined, { append: true })} onrunall={() => run(undefined, { sql: tab.query })} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunnew={() => run(undefined, { append: true })} onrunall={() => run(undefined, { sql: tab.query })} {schema} {columnsOf} dialect={conn.engine} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />

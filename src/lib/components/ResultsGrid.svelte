@@ -422,6 +422,15 @@
     if (selected[r.key] && !hasCols) return 'bg-accent/10';
     return 'hover:bg-hover';
   }
+
+  /** The row's tint for the sticky row-number cell: its opaque background hides the tint on the `tr`. */
+  function numberTint(r: GridRow) {
+    if (edits.error?.key === r.key) return 'bg-red-500/15';
+    if (isDeleted(r)) return 'bg-red-500/8 dark:bg-red-500/10';
+    if (r.isNew) return 'bg-emerald-500/8 dark:bg-emerald-500/10';
+    if (selected[r.key] && !hasCols) return 'bg-accent/10';
+    return 'group-hover/row:bg-hover';
+  }
 </script>
 
 <svelte:window
@@ -471,7 +480,7 @@
         </colgroup>
         <thead class="sticky top-0 z-10">
           <tr>
-            <th class="w-9 border-b border-line bg-surface px-2 py-0 text-right font-sans text-[10.5px] font-normal text-faint"></th>
+            <th class="sticky left-0 w-9 border-b border-line bg-surface px-2 py-0 text-right font-sans text-[10.5px] font-normal text-faint shadow-[1px_0_0_var(--c-line)]"></th>
             {#each result.columns as c, ci}
               <th class="group/th relative h-8 border-b border-l border-line bg-surface px-2.5 py-0 text-left font-normal" title={result.types?.[ci]}>
                 {#if pickedCols[c]}<span class="pointer-events-none absolute inset-0 bg-accent/10"></span>{/if}
@@ -516,9 +525,9 @@
           {#each rows as r, i (r.key)}
             <tr class="group/row {rowTint(r)}">
               <td
-                class="cursor-pointer border-b border-line/60 px-2 text-right text-[10.5px] tabular-nums select-none {selected[r.key] ? 'font-medium text-ink' : 'text-faint'}"
+                class="sticky left-0 z-[1] cursor-pointer border-b border-line/60 bg-surface px-2 text-right text-[10.5px] tabular-nums shadow-[1px_0_0_var(--c-line)] select-none {selected[r.key] ? 'font-medium text-ink' : 'text-faint'}"
                 onclick={(e) => pickRow(i, e)}
-              >{r.isNew ? '+' : i + 1}</td>
+              ><span class="pointer-events-none absolute inset-0 {numberTint(r)}"></span><span class="relative">{r.isNew ? '+' : i + 1}</span></td>
               {#each result.columns as c}
                 {@const v = value(r, c)}
                 {@const isEd = editing?.key === r.key && editing.col === c}

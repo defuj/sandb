@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, gutter, GutterMarker } from '@codemirror/view';
-  import { EditorState, Compartment, RangeSetBuilder, type RangeSet, type Text } from '@codemirror/state';
+  import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
+  import { EditorState, Compartment, type Text } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, selectAll as selectAllCmd } from '@codemirror/commands';
   import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
-  import { syntaxHighlighting, HighlightStyle, syntaxTree } from '@codemirror/language';
+  import { syntaxHighlighting, HighlightStyle, syntaxTree, foldService, foldGutter, foldedRanges, foldEffect, unfoldEffect, foldAll, unfoldAll, codeFolding } from '@codemirror/language';
   import { autocompletion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
   import { tags as t } from '@lezer/highlight';
   import { columnCompletion } from '../sql/columns';
@@ -15,7 +15,6 @@
     onrun,
     onrunnew,
     onrunall,
-    onrunstatement,
     schema = {},
     dialect = 'pg',
     columnsOf,
@@ -27,8 +26,6 @@
     onrunnew?: () => void;
     /** Runs every statement in the editor (Alt+X, as in DBeaver). */
     onrunall?: () => void;
-    /** Runs one statement from the Run gutter, without changing the editor text. */
-    onrunstatement?: (sql: string) => void;
     schema?: Record<string, string[]>;
     dialect?: 'pg' | 'mysql' | 'sqlite';
     /** Columns of a table that `schema` holds without columns (or not under this name); [] when unknown. */
@@ -155,69 +152,56 @@
     return (parts.find((p) => head <= p.to) ?? parts.at(-1))?.text ?? '';
   }
 
-  /** A play button in the gutter at the first line of each statement. */
-  const runIcon = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1.5 8.5 5 2 8.5Z" fill="currentColor"/></svg>';
-  class RunStatementMarker extends GutterMarker {
-    readonly sql: string;
-    constructor(sql: string) {
-      super();
-      this.sql = sql;
+  /** Fold range of each statement that spans lines: from the end of its first line to its end. */
+  type Fold = { from: number; to: number; end: number };
+  let foldDoc: Text | null = null;
+  let foldDialect: Dialect | null = null;
+  let folds: Fold[] = [];
+
+  function statementFolds(state: EditorState): Fold[] {
+    if (state.doc === foldDoc && dialect === foldDialect) return folds;
+    const doc = state.doc.toString();
+    const out: Fold[] = [];
+    for (const [from, to] of statementRanges(doc, dialect, true)) {
+      const raw = doc.slice(from, to);
+      // Comments and strings are blanked; a comments-only range gets nothing.
+      const masked = maskLiterals(raw, dialect);
+      if (!masked.trim()) continue;
+      const first = state.doc.lineAt(from + masked.length - masked.trimStart().length);
+      const last = from + masked.trimEnd().length;
+      // `end` is the range end `statementAt` uses, so the cursor picks the same statement.
+      if (last > first.to && !(out.length && first.from <= out[out.length - 1].to)) out.push({ from: first.to, to: last, end: to });
     }
-    eq(other: GutterMarker) {
-      return other instanceof RunStatementMarker && other.sql === this.sql;
-    }
-    toDOM() {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'cm-statement-run';
-      b.title = 'Run this statement';
-      b.setAttribute('aria-label', 'Run this statement');
-      b.tabIndex = -1;
-      b.innerHTML = runIcon;
-      b.addEventListener('mousedown', (e) => e.preventDefault());
-      b.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onrunstatement?.(this.sql);
-      });
-      return b;
-    }
+    foldDoc = state.doc;
+    foldDialect = dialect;
+    folds = out;
+    return out;
   }
 
-  /** One marker per line that starts a statement; comments alone get no marker. */
-  let markerDoc: Text | null = null;
-  let markerDialect: Dialect | null = null;
-  let markerSet: RangeSet<GutterMarker> | null = null;
+  /** Each statement folds from the line it starts on, like a block in VS Code. */
+  const statementFold = foldService.of((state, lineStart, lineEnd) => statementFolds(state).find((f) => f.from === lineEnd && f.from >= lineStart) ?? null);
 
-  const runGutter = gutter({
-    class: 'cm-run-gutter',
-    markers: (v) => {
-      // The gutter asks for markers on every view update; only a new document or dialect can change them.
-      if (v.state.doc === markerDoc && dialect === markerDialect && markerSet) return markerSet;
-      const doc = v.state.doc.toString();
-      const builder = new RangeSetBuilder<GutterMarker>();
-      let lastLine = -1;
-      for (const [from, to] of statementRanges(doc, dialect, true)) {
-        const raw = doc.slice(from, to);
-        // Comments and strings are blanked; a comments-only range gets nothing.
-        const masked = maskLiterals(raw, dialect);
-        if (!masked.trim()) continue;
-        const text = raw.trim();
-        const at = from + masked.length - masked.trimStart().length;
-        const line = v.state.doc.lineAt(at);
-        if (line.from === lastLine) continue;
-        lastLine = line.from;
-        builder.add(line.from, line.from, new RunStatementMarker(text));
-      }
-      markerDoc = v.state.doc;
-      markerDialect = dialect;
-      markerSet = builder.finish();
-      return markerSet;
-    },
-    // Cursor moves and scrolling do not redraw the gutter; a dialect reconfigure does.
-    lineMarkerChange: (u) => u.docChanged || u.transactions.some((tr) => tr.reconfigured),
-    initialSpacer: () => new RunStatementMarker(''),
-  });
+  /** Folds the statement at the cursor (any line of it), or unfolds it when it is folded. */
+  function toggleStatementFold(v: EditorView) {
+    const head = v.state.selection.main.head;
+    const list = statementFolds(v.state);
+    const f = list.find((f) => head <= f.end && head >= v.state.doc.lineAt(f.from).from);
+    if (!f) return false;
+    let folded = false;
+    foldedRanges(v.state).between(f.from, f.from, (from) => {
+      if (from === f.from) folded = true;
+    });
+    v.dispatch({ effects: (folded ? unfoldEffect : foldEffect).of({ from: f.from, to: f.to }) });
+    return true;
+  }
+
+  const chevron = (open: boolean) => {
+    const s = document.createElement('span');
+    s.className = 'cm-fold-chevron';
+    s.title = open ? 'Fold statement' : 'Unfold statement';
+    s.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="${open ? 'M3 4.5 6 7.5 9 4.5' : 'M4.5 3 7.5 6 4.5 9'}" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    return s;
+  };
 
   let el: HTMLDivElement;
   let view = $state.raw<EditorView>();
@@ -237,22 +221,10 @@
     '.cm-scroller': { fontFamily: "'JetBrains Mono Variable', ui-monospace, monospace", lineHeight: '1.6' },
     '.cm-content': { padding: '2px 0 8px' },
     '.cm-gutters': { backgroundColor: 'transparent', border: 'none', color: 'var(--c-faint)', paddingLeft: '10px', paddingRight: '4px' },
-    '.cm-run-gutter': { width: '18px' },
-    '.cm-run-gutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0' },
-    '.cm-run-gutter .cm-statement-run': {
-      display: 'grid',
-      placeItems: 'center',
-      width: '16px',
-      height: '18px',
-      padding: '0',
-      border: 'none',
-      borderRadius: '3px',
-      background: 'transparent',
-      color: 'var(--c-faint)',
-      opacity: '0.7',
-      cursor: 'pointer',
-    },
-    '.cm-run-gutter .cm-statement-run:hover': { color: 'var(--c-accent)', opacity: '1' },
+    '.cm-foldGutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 2px' },
+    '.cm-fold-chevron': { display: 'grid', placeItems: 'center', width: '14px', height: '18px', color: 'var(--c-faint)', cursor: 'pointer' },
+    '.cm-fold-chevron:hover': { color: 'var(--c-ink)' },
+    '.cm-foldPlaceholder': { backgroundColor: 'var(--c-hover)', border: 'none', borderRadius: '4px', color: 'var(--c-muted)', padding: '0 5px', margin: '0 4px' },
     '.cm-activeLine': { backgroundColor: 'var(--c-hover)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--c-ink)' },
     '.cm-cursor': { borderLeftColor: 'var(--c-accent)', borderLeftWidth: '2px' },
@@ -268,7 +240,9 @@
       state: EditorState.create({
         doc: value,
         extensions: [
-          ...(onrunstatement ? [runGutter] : []),
+          codeFolding({ placeholderText: '…' }),
+          statementFold,
+          foldGutter({ markerDOM: chevron }),
           lineNumbers(),
           // CodeMirror draws the cursor: WebKit (Tauri) drops the native caret under the glass panels.
           drawSelection(),
@@ -278,6 +252,9 @@
             { key: 'Mod-Enter', run: () => (onrun?.(), true) },
             { key: 'Mod-Shift-Enter', run: () => (onrunnew?.(), true) },
             { key: 'Alt-x', run: () => (onrunall?.(), true) },
+            { key: 'Mod-Alt-[', run: toggleStatementFold },
+            { key: 'Ctrl-Alt-[', run: foldAll },
+            { key: 'Ctrl-Alt-]', run: unfoldAll },
             ...defaultKeymap,
             ...historyKeymap,
           ]),

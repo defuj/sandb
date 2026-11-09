@@ -1,3 +1,4 @@
+import { untrack } from 'svelte';
 import { schemas, tableData, nsOf, type Row, type Cell } from './mock';
 import { active, ui, db, canWrite, flushAi, type Conn } from './state.svelte';
 import { activeTab, defaultDb } from './tabs.svelte';
@@ -159,6 +160,36 @@ export function setScope(list: Source[]) {
   if (s) s.sources = list;
   else chat.draft = list;
 }
+
+/** Opens the assistant on the active tab's database. A chat that does not use it gives way to a new chat; an empty chat takes the tab's database. */
+export function openChatOnTab() {
+  ui.chatOpen = true;
+  const t = tabSource();
+  if (!t || chat.live) return;
+  const s = current();
+  if (!s || !s.sources.some((x) => sameSource(x, t))) openSession('');
+}
+
+// The tab moved to another database: a chat that does not use it gives way to a new chat on it.
+// Only a change of the tab's database acts, so a chat the user opens from history stays open.
+let lastTab: string | undefined;
+$effect.root(() => {
+  $effect(() => {
+    const t = tabSource();
+    if (!t) return;
+    const key = `${t.connId}\u0000${dbOf(t)}`;
+    if (key === lastTab) return;
+    lastTab = key;
+    untrack(() => {
+      if (chat.live) return;
+      const s = current();
+      if (s && !s.sources.some((x) => sameSource(x, t))) {
+        chat.open = '';
+        chat.draft = null;
+      }
+    });
+  });
+});
 
 export function deleteSession(id: string) {
   if (id !== chat.live) chat.sessions = chat.sessions.filter((s) => s.id !== id);

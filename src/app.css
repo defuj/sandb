@@ -83,9 +83,9 @@ html.backdrop body { background-color: transparent; }
 html.glass .card { box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-ink) 9%, transparent); }
 html.glass .card::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.4); backdrop-filter: blur(var(--panel-blur)) saturate(1.4); }
 /* Glass: flat parts of a panel (tabs, chips, code blocks) take a light tint instead of the opaque surface,
-   so they do not show as solid bars. Dialogs, menus and sticky headers keep the opaque surface: through a tint,
-   the rows that scroll under a sticky header show through it. */
-html.glass .card .bg-surface:not(:where(.dialog, .popover, thead.sticky) *, thead.sticky) { background-color: color-mix(in srgb, var(--c-surface) 45%, transparent); }
+   so they do not show as solid bars. Dialogs, menus, sticky headers and sticky cells keep the opaque surface: through a
+   tint, the rows that scroll under a sticky header or cell show through it. */
+html.glass .card .bg-surface:not(:where(.dialog, .popover, thead.sticky) *, thead.sticky, td.sticky) { background-color: color-mix(in srgb, var(--c-surface) 45%, transparent); }
 html.glass .card .bg-sunken:not(:where(.dialog, .popover, thead.sticky) *, thead.sticky) { background-color: color-mix(in srgb, var(--c-sunken) 40%, transparent); }
 ::selection { background: color-mix(in srgb, var(--c-accent) 28%, transparent); }
 
