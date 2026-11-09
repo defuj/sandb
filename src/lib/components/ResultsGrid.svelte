@@ -66,6 +66,16 @@
     if (blocker) edits.on = false;
   });
 
+  // A notice not tied to a row (for example "not editable") goes away by itself; row errors stay until dismissed.
+  $effect(() => {
+    const err = edits.error;
+    if (!err || err.key) return;
+    const t = setTimeout(() => {
+      if (edits.error === err) edits.error = null;
+    }, 4000);
+    return () => clearTimeout(t);
+  });
+
   function sortBy(c: string) {
     if (!result?.sortable || result.summary || loading) return;
     onsort?.({ column: c, columnIndex: result.columns.indexOf(c), ascending: sort?.column === c ? !sort.ascending : true });

@@ -7,7 +7,7 @@
   import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
   import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
   import { schemas, runMock, statementKind, nsOf, type QueryResult, type Row, type Schema } from './lib/mock';
-  import { statementRanges } from './lib/sql/text';
+  import { appendStatement, statementRanges } from './lib/sql/text';
   import { toResult, toResults, snapshotSchema, snapshotKey } from './lib/results';
   import ConnectionTree from './lib/components/ConnectionTree.svelte';
   import ConnectionDialog from './lib/components/ConnectionDialog.svelte';
@@ -32,7 +32,8 @@
   import { tabs, activeTab, newTab, selectTab, closeTab, setTabConn, defaultDb, openTableTab, setResults, replaceResult, replaceActiveResult, activateResult, closeResult, clearResults, type Tab } from './lib/tabs.svelte';
   import { manualCommit, refreshStatus, endTx, leaveSession, settlePending, txPrompt } from './lib/tx.svelte';
   import PendingTxDialog from './lib/components/PendingTxDialog.svelte';
-  import { updates, checkForUpdates } from './lib/updates.svelte';
+  import WhatsNewDialog from './lib/components/WhatsNewDialog.svelte';
+  import { updates, checkForUpdates, showWhatsNew } from './lib/updates.svelte';
 
   const isMock = api.kind === 'mock';
   // The overlay title bar puts the macOS window buttons over the top-left corner.
@@ -42,6 +43,7 @@
   // Never undefined: closing the last tab opens a fresh one.
   const tab = $derived(activeTab()!);
   checkForUpdates(true);
+  showWhatsNew();
 
   let guardTarget = $state<Conn | null>(null);
   let connDialog = $state(false);
@@ -325,17 +327,19 @@
   });
 
   /**
-   * Runs the selection, or the whole editor. `again` re-runs the shown result with a higher limit.
+   * Runs the selection, or the statement at the cursor (as DBeaver's Ctrl+Enter); without an editor,
+   * the whole query. `again` re-runs the shown result with a higher limit.
    * `pick` runs the given SQL instead; with `script` (a file name) the toolbar shows statement progress.
+   * With `append` the results open as new result tabs after the current ones.
    */
-  async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql: string; script?: string; sort?: ResultSort }) {
+  async function run(again?: { sql: string; limit: number; sort?: ResultSort }, pick?: { sql?: string; script?: string; sort?: ResultSort; append?: boolean }) {
     // The result lands on this tab even if the user switches tabs while it runs.
     const t = tab;
     if (running[t.id] || (!again && !confirmDiscard())) return;
     // A re-run keeps its target: switching or closing result tabs during the await must not
     // move its rows into another Result tab.
     const targetResult = again ? t.result : null;
-    const sql = again?.sql ?? pick?.sql ?? (editor?.selection().trim() || t.query);
+    const sql = again?.sql ?? pick?.sql ?? (editor ? editor.selection().trim() || editor.statementAt() : t.query);
     const sort = again?.sort ?? pick?.sort;
     if (!again) t.sort = pick?.sort;
     const k = statementKind(sql);
@@ -383,11 +387,10 @@
     if (again) {
       if (targetResult) replaceResult(t, targetResult, r);
       else replaceActiveResult(t, r);
-    } else if (all?.length) {
-      setResults(t, all, active);
-      t.resultConn = c;
     } else {
-      setResults(t, [r], 0);
+      const fresh = all?.length ? all : [r];
+      if (pick?.append) setResults(t, [...t.results, ...fresh], t.results.length + (all?.length ? active : 0));
+      else setResults(t, fresh, all?.length ? active : 0);
       t.resultConn = c;
     }
     if (again) {
@@ -630,7 +633,8 @@
   function openTable(t: string) {
     if (!confirmDiscard()) return;
     tab.query = `SELECT *\nFROM ${conn.engine === 'pg' ? nsOf(conn.engine, t) + '.' : ''}${t}\nLIMIT 200;`;
-    run();
+    // The editor text updates after this tick, so the statement goes in as SQL.
+    run(undefined, { sql: tab.query });
   }
 
   /** A palette table: real connections open it in its own table tab, like the tree does. */
@@ -692,30 +696,24 @@
     focusEditor();
   }
 
-  /** Selects the tab that already edits `q`, or opens it on its connection and database (an empty tab there is reused). */
+  /** Opens `q` in a new tab on its connection and database; an empty tab there is reused. */
   async function openSaved(q: SavedQuery, andRun = false) {
-    let t = tabs.list.find((x) => x.savedId === q.id);
-    if (t) {
-      if (t.id !== tab.id && !confirmDiscard()) return;
-      selectTab(t.id);
-    } else {
-      if (!confirmDiscard()) return;
-      // A deleted connection: the query opens on the current one.
-      const own = db.connections.find((x) => x.id === q.connId);
-      const c = own ?? conn;
-      const dbName = own && q.database ? q.database : defaultDb(c);
-      const cur = tab;
-      const blank = !cur.table && !cur.savedId && !cur.query.trim() && !cur.result && !running[cur.id] && cur.connId === c.id && cur.database === dbName;
-      t = blank ? cur : newTab();
-      if (!blank) {
-        setTabConn(t, c);
-        t.database = dbName;
-        t.resultConn = c;
-      }
-      t.query = q.sql;
-      t.title = q.name;
-      t.savedId = q.id;
+    if (!confirmDiscard()) return;
+    // A deleted connection: the query opens on the current one.
+    const own = db.connections.find((x) => x.id === q.connId);
+    const c = own ?? conn;
+    const dbName = own && q.database ? q.database : defaultDb(c);
+    const cur = tab;
+    const blank = !cur.table && !cur.savedId && !cur.query.trim() && !cur.result && !running[cur.id] && cur.connId === c.id && cur.database === dbName;
+    const t = blank ? cur : newTab();
+    if (!blank) {
+      setTabConn(t, c);
+      t.database = dbName;
+      t.resultConn = c;
     }
+    t.query = q.sql;
+    t.title = q.name;
+    t.savedId = q.id;
     ui.page = 'query';
     await tick();
     tabStrip?.querySelector('[aria-current=page]')?.scrollIntoView({ inline: 'nearest' });
@@ -748,7 +746,7 @@
     return nt;
   }
 
-  /** A Run from a chat code block: a new tab there, or the active editor tab the user picked. */
+  /** A Run from a chat code block: a new tab there, or the active editor tab the user picked when it is on the same database. */
   function chatRun(sql: string, src?: ChatSource, target: 'active' | 'new' = 'new') {
     // Writes are inserted for review, never executed straight from an assistant reply.
     const dialect = (src ? connOf(src)?.engine : conn.engine) ?? 'pg';
@@ -758,26 +756,26 @@
       chatInsert(sql, src);
       return;
     }
-    if (target === 'new') {
+    const t = tab;
+    const same = !src || !connOf(src) || (t.connId === src.connId && t.database === dbOf(src));
+    if (target === 'new' || !same) {
       if (!confirmDiscard()) return;
       ui.page = 'query';
       chatTab(sql, src);
       run(undefined, { sql });
       return;
     }
-    const t = tab;
     if (t.table || running[t.id] || statementKind(sql) === 'empty' || !confirmDiscard()) return;
     ui.page = 'query';
-    // Keep the query already in the tab; the new one goes below it with one blank line.
-    const current = t.query.trimEnd();
-    t.query = current ? `${current}\n\n${sql}` : sql;
+    // Keep the query already in the tab; the new one goes below it as its own statement.
+    t.query = appendStatement(t.query, sql, conn.engine);
     run(undefined, { sql });
   }
 
   /** Appended to the active editor when it is on the step's database, else into a new tab there. */
   function chatInsert(sql: string, src?: ChatSource) {
     const same = !src || !connOf(src) || (tab.connId === src.connId && tab.database === dbOf(src));
-    if (!tab.table && same) tab.query = tab.query.trim() ? `${tab.query.trimEnd()}\n\n${sql}` : sql;
+    if (!tab.table && same) tab.query = appendStatement(tab.query, sql, conn.engine);
     else chatTab(sql, src);
   }
 
@@ -997,9 +995,9 @@
       {/if}
       </div>
       {#if kind === 'read'}
-        <span class="hidden shrink-0 px-1 text-[12px] font-medium text-emerald-700 lg:inline dark:text-emerald-400">Read</span>
+        <span class="hidden shrink-0 px-1 text-[12px] font-medium text-emerald-700 lg:inline dark:text-emerald-400" role="status" title="This query only reads data">Read</span>
       {:else if kind === 'write'}
-        <span class="shrink-0 px-1 text-[12px] font-medium text-amber-700 dark:text-amber-400">Write</span>
+        <span class="shrink-0 px-1 text-[12px] font-medium text-amber-700 dark:text-amber-400" role="status" title="This query changes data">Write</span>
       {/if}
       <!-- A saved, unchanged tab shows "Saved"; ⌘S then has nothing to write. -->
       <button class="btn btn-ghost shrink-0 px-2 xl:px-2.5" onclick={() => saveQuery()} disabled={!savedQ && kind === 'empty'} title={savedQ ? (tabClean ? `“${savedQ.name}” is saved · ⇧⌘S saves a copy` : `Save changes to “${savedQ.name}” (⌘S)`) : 'Save query (⌘S)'} aria-label={tabClean ? 'Saved' : 'Save query'}>
@@ -1023,7 +1021,7 @@
         <span class="font-mono text-[11.5px] text-muted tabular-nums">{((now - busy.started) / 1000).toFixed(1)} s</span>
         <button class="btn btn-secondary" onclick={cancel} title="Cancel the running query"><Square size={11} class="fill-current" /> Cancel</button>
       {:else}
-        <button class="btn btn-primary pr-2" onclick={() => run()} disabled={kind === 'empty'} title="Run the selection, or the whole editor"><Play size={11} class="fill-current" /> Run <kbd class="ml-0.5 hidden font-sans text-[11px] font-normal lg:inline" aria-hidden="true">⌘↵</kbd></button>
+        <button class="btn btn-primary pr-2" onclick={() => run()} disabled={kind === 'empty'} title="Run the selection, or the statement at the cursor"><Play size={11} class="fill-current" /> Run <kbd class="ml-0.5 hidden font-sans text-[11px] font-normal lg:inline" aria-hidden="true">⌘↵</kbd></button>
       {/if}
     </div>
 
@@ -1031,7 +1029,7 @@
     <div class="min-h-28 overflow-hidden {ui.resultsOpen ? 'shrink-0' : 'flex-1'}" style:height={ui.resultsOpen ? `${ui.editorSplit * 100}%` : undefined} oncontextmenu={openEditorMenu}>
       <!-- Keyed so undo never crosses into another tab's text. -->
       {#key tab.id}
-        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
+        <SqlEditor bind:this={editor} bind:value={tab.query} onrun={() => run()} onrunnew={() => run(undefined, { append: true })} onrunall={() => run(undefined, { sql: tab.query })} onrunstatement={(sql) => run(undefined, { sql })} {schema} {columnsOf} dialect={conn.engine} />
       {/key}
     </div>
     <input bind:this={scriptInput} type="file" accept=".sql,text/plain" class="hidden" onchange={runScript} />
@@ -1050,8 +1048,8 @@
 
       <div class="flex min-h-0 flex-1 flex-col border-t border-line">
         <!-- Result tab strip (as in DBeaver): one tab per grid result; its X closes that result. -->
+        {#if tab.results.length}
         <div class="flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto border-b border-line px-1.5" role="tablist" aria-label="Results">
-          {#if tab.results.length}
             {#each tab.results as r, i (i)}
               {@const on = tab.resultIndex === i}
               <div
@@ -1068,14 +1066,8 @@
                 <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Close result" aria-label="Close result" onclick={(e) => { e.stopPropagation(); dropResult(tab, i); }}><X size={12} /></button>
               </div>
             {/each}
-          {:else}
-            <div class="-mb-px flex h-7 items-center gap-1.5 rounded-t-md border border-b-0 border-line bg-surface pr-1 pl-2.5 text-[12.5px] font-medium text-ink" role="tab" aria-selected="true">
-              <Table2 size={13} class="text-accent" />
-              <span class="max-w-60 truncate">Results</span>
-              <button class="ml-1 grid size-[18px] place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Hide results" aria-label="Hide results" onclick={() => (ui.resultsOpen = false)}><X size={12} /></button>
-            </div>
-          {/if}
         </div>
+        {/if}
         <div class="relative min-h-0 flex-1">
           {#key `${tab.id}:${tab.resultIndex}:${tab.result?.sql ?? ''}:${tab.result?.title ?? ''}`}
             <ResultsGrid result={tab.result} conn={tab.resultConn} {schema} loading={!!busy} sort={tab.result?.sort ?? null} onsort={(s) => sortResult(tab, s)} onloadmore={loadMore} onsaved={() => refreshResult(tab)} />
@@ -1105,8 +1097,8 @@
 {#if editorMenu}
   {@const m = editorMenu}
   <div class="popover fixed z-40 w-56 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
-    <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => run(undefined, { sql: m.sel ? editor!.selection() : editor!.statementAt() }))}><Play size={13} /> {m.sel ? 'Run selection' : 'Run statement at cursor'}</button>
-    <button class="nav-item" role="menuitem" disabled={!!busy || kind === 'empty'} onclick={() => menuAct(() => run(undefined, { sql: tab.query }))}><ListOrdered size={13} /> Run all statements</button>
+    <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => run(undefined, { sql: m.sel ? editor!.selection() : editor!.statementAt() }))}><Play size={13} /> <span class="flex-1">{m.sel ? 'Run selection' : 'Run statement at cursor'}</span><kbd class="kbd">⌘↵</kbd></button>
+    <button class="nav-item" role="menuitem" disabled={!!busy || kind === 'empty'} onclick={() => menuAct(() => run(undefined, { sql: tab.query }))}><ListOrdered size={13} /> <span class="flex-1">Run all statements</span><kbd class="kbd">⌥X</kbd></button>
     <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => scriptInput?.click())}><FileUp size={13} /> Run SQL script from file…</button>
     <div class="mx-2 my-1 h-px bg-line"></div>
     <button class="nav-item" role="menuitem" disabled={!savedQ && kind === 'empty'} onclick={() => menuAct(() => saveQuery())}><Save size={13} /> <span class="flex-1">{savedQ ? 'Save changes' : 'Save query…'}</span><kbd class="kbd">⌘S</kbd></button>
@@ -1123,6 +1115,7 @@
 <DeleteConnectionDialog bind:target={connDelete} ondelete={deleteConnection} />
 <TableDangerDialog bind:target={danger} onconfirm={runDanger} />
 <SaveQueryDialog bind:ask={saveAsk} onsave={confirmSave} />
+<WhatsNewDialog />
 {#if notice}
   {@const n = notice}
   <div class="popover fixed bottom-3 left-3 z-50 flex max-w-md items-start gap-2 px-3 py-2 text-[12.5px] {n.ok ? 'text-ink' : 'text-red-700 dark:text-red-300'}" role={n.ok ? 'status' : 'alert'}>

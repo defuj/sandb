@@ -33,6 +33,19 @@ jobs:
           v=$(node -p "require('./package.json').version")
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME does not match package.json version $v"; exit 1; }
 
+      # The CHANGELOG.md section of this version becomes the release notes on GitHub
+      # and in latest.json, which the app shows when it finds the update.
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v v="$v" '
+            /^## / { if (found) exit; if (index($0, "## [" v "]") == 1) { found = 1; next } }
+            found
+          ' CHANGELOG.md | sed '/./,$!d')
+          [ -n "$notes" ] || { echo "CHANGELOG.md has no section ## [$v]"; exit 1; }
+          { echo 'body<<CHANGELOG_EOF'; echo "$notes"; echo 'CHANGELOG_EOF'; } >> "$GITHUB_OUTPUT"
+
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -78,7 +91,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: sandb ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md for the changes in this version.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}

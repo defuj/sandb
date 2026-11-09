@@ -339,6 +339,8 @@ export interface ChartSpec {
 /** One streamed step of a chat reply. Every stream ends with exactly one `done` or `error`. */
 export type ChatEvent =
   | { type: 'text'; delta: string }
+  /** The model has begun a tool call whose arguments are still streaming. At most once per call, before its `tool_call`. */
+  | { type: 'tool_starting'; name: string }
   | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
   | {
       type: 'tool_result';

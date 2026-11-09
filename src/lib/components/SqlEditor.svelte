@@ -13,13 +13,20 @@
   let {
     value = $bindable(''),
     onrun,
+    onrunnew,
+    onrunall,
     onrunstatement,
     schema = {},
     dialect = 'pg',
     columnsOf,
   }: {
     value?: string;
+    /** Runs the selection, or the statement at the cursor. */
     onrun?: () => void;
+    /** Like `onrun`, but the results open in new result tabs. */
+    onrunnew?: () => void;
+    /** Runs every statement in the editor (Alt+X, as in DBeaver). */
+    onrunall?: () => void;
     /** Runs one statement from the Run gutter, without changing the editor text. */
     onrunstatement?: (sql: string) => void;
     schema?: Record<string, string[]>;
@@ -134,14 +141,15 @@
   }
 
   /**
-   * The statement under the cursor, `;` included. On a blank line it takes the next statement; after
-   * the last one, the last one. '' when the editor holds no statement.
+   * The statement under the cursor, `;` included; a blank line also ends a statement, as in DBeaver.
+   * On a blank line it takes the next statement; after the last one, the last one. '' when the editor
+   * holds no statement.
    */
   export function statementAt() {
     if (!view) return '';
     const doc = view.state.doc.toString();
     const head = view.state.selection.main.head;
-    const parts = statementRanges(doc, dialect)
+    const parts = statementRanges(doc, dialect, true)
       .map(([from, to]) => ({ to, text: doc.slice(from, to).trim() }))
       .filter((p) => p.text && p.text !== ';');
     return (parts.find((p) => head <= p.to) ?? parts.at(-1))?.text ?? '';
@@ -162,7 +170,7 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'cm-statement-run';
-      b.title = 'Run this statement (⇧⌘↵)';
+      b.title = 'Run this statement';
       b.setAttribute('aria-label', 'Run this statement');
       b.tabIndex = -1;
       b.innerHTML = runIcon;
@@ -189,7 +197,7 @@
       const doc = v.state.doc.toString();
       const builder = new RangeSetBuilder<GutterMarker>();
       let lastLine = -1;
-      for (const [from, to] of statementRanges(doc, dialect)) {
+      for (const [from, to] of statementRanges(doc, dialect, true)) {
         const raw = doc.slice(from, to);
         // Comments and strings are blanked; a comments-only range gets nothing.
         const masked = maskLiterals(raw, dialect);
@@ -268,16 +276,8 @@
           history(),
           keymap.of([
             { key: 'Mod-Enter', run: () => (onrun?.(), true) },
-            // Keyboard counterpart of the gutter play button.
-            {
-              key: 'Mod-Shift-Enter',
-              run: () => {
-                const sql = statementAt();
-                if (!sql || !onrunstatement) return false;
-                onrunstatement(sql);
-                return true;
-              },
-            },
+            { key: 'Mod-Shift-Enter', run: () => (onrunnew?.(), true) },
+            { key: 'Alt-x', run: () => (onrunall?.(), true) },
             ...defaultKeymap,
             ...historyKeymap,
           ]),

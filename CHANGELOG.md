@@ -4,11 +4,32 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-09
+
+- Fixed: a Run from an assistant SQL block could run the query on the database of the active tab, not on the database of the chat. If the reply has no step with a database, the block now uses the chat database when the chat has only one. If the active tab is on a different database, **Run in active tab** opens a new tab on the database of the block. The menu tells you this.
+- Fixed: **Open** and **Open and run** on a saved query did not open a new tab when the query was already open in a tab. They selected that tab again. Now they always open a new tab. They use the active tab only if it is empty and on the same database.
+- Fixed: **Run in active tab** and **Insert into editor** on an assistant SQL block added the query below the current text without a `;`. When you ran all of the editor, the two queries ran as one statement and failed with `syntax error at or near "SELECT"`. Now the app adds `;` after the last statement first.
+- The assistant now shows a **Query used** block under each reply that ran a query when steps are hidden. You can copy the SQL or send it to the editor without a second question.
+- The steps header of a reply now shows the total reply time. The time that the queries took shows as **query … ms**.
+- While the model writes a tool call, the assistant shows what it does (for example **Writing query…** or **Reading schema…**), not only **Thinking…**. The backend sends a new `tool_starting` chat event for this.
+- The assistant does not suggest write prompts (for example "Delete cancelled orders…") when it is in read-only mode.
+- SQL code blocks in the assistant panel now wrap long lines. The copy and Run buttons do not cover the text.
+- The result pane does not show an empty **Results** tab when there are no results. Use the **Results** button at the bottom to show or hide the pane.
+- The **Read** and **Write** labels in the editor toolbar now have a tooltip.
+- Table tabs do not use a query number. A new query tab gets the lowest free number (**Query 1**, **Query 2**, …).
+- The connection tooltip in the tree now shows the environment. Production connections show a **production** tag.
+
+## [0.8.0] - 2026-11-07
+
 - SQL code blocks in the assistant panel now have a Run button. Read blocks open a small menu with **Run in active tab** (adds the query below the current text, with one blank line) and **Run in a new tab** (on the database of the reply). Picking an item runs the query at once.
 - Write blocks are inserted into the editor instead of being executed. The menu says so and offers **Insert into editor**, so you can review the SQL and run it yourself. Non-SQL blocks keep Copy only.
 - The menu shows whether the block reads or writes and how many statements it holds. Each Run choice shows the database and environment it will use.
 - A run with several statements now gets one **Result** tab per statement that returns rows, plus a **Messages** tab for writes. Each result tab can be closed on its own; the last one hides the results pane.
-- The editor has a small Run button in the gutter at the first line of each statement, like DBeaver's execute-statement action. It runs only that statement and leaves the editor text unchanged; ⇧⌘↵ runs the statement at the cursor from the keyboard.
+- The editor has a small Run button in the gutter at the first line of each statement, like DBeaver's execute-statement action. It runs only that statement and leaves the editor text unchanged.
+- ⇧⌘↵ runs the query like ⌘↵, but the results open in new result tabs. The result tabs of earlier runs stay open.
+- The red notice above the results footer, for example "Only a simple single-table SELECT with plain columns or * is editable", now closes by itself after 4 seconds. A notice about a failed save on a row stays until you close it.
+- After an update, the first start shows a "What's new" dialog with the changes since the last version you opened. "Got it" or Esc closes it, and it does not open again for that version.
+- The release notes on GitHub now show the changes of that version from this changelog. Before, they only said "See CHANGELOG.md".
 
 ## [0.7.3] - 2026-11-05
 

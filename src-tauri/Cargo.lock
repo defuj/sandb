@@ -3821,7 +3821,7 @@ dependencies = [
 
 [[package]]
 name = "sandb"
-version = "0.7.3"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "axum",

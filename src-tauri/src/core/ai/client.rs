@@ -56,6 +56,15 @@ pub struct Completion {
     pub finish_reason: Option<String>,
 }
 
+/// What `chat_stream` reports while the answer streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEvent<'a> {
+    /// A text delta.
+    Text(&'a str),
+    /// The name of a tool call, once per call, before its arguments finish streaming.
+    ToolStarting(&'a str),
+}
+
 pub struct AiClient {
     http: reqwest::Client,
     api: Api,
@@ -129,14 +138,15 @@ impl AiClient {
     }
 
     /// Streams the answer to `body`, an OpenAI chat body that asks for `stream: true`.
-    /// `on_text` gets each text delta; returning false stops the stream as a cancel does.
+    /// `on_event` gets each text delta and each tool call name; returning false stops the
+    /// stream as a cancel does.
     pub async fn chat_stream(
         &self,
         body: &Value,
         cancel: &CancellationToken,
-        on_text: impl FnMut(&str) -> bool,
+        on_event: impl FnMut(StreamEvent<'_>) -> bool,
     ) -> Result<Completion, AppError> {
-        self.stream_inner(body, cancel, on_text)
+        self.stream_inner(body, cancel, on_event)
             .await
             .map_err(|e| self.redact(e))
     }
@@ -145,7 +155,7 @@ impl AiClient {
         &self,
         body: &Value,
         cancel: &CancellationToken,
-        mut on_text: impl FnMut(&str) -> bool,
+        mut on_event: impl FnMut(StreamEvent<'_>) -> bool,
     ) -> Result<Completion, AppError> {
         let (path, body) = match self.api {
             Api::OpenAi => ("chat/completions", serde_json::to_vec(body)?),
@@ -190,19 +200,19 @@ impl AiClient {
                 Ok(Some(Ok(b))) => b,
             };
             for line in lines.push(&chunk)? {
-                if acc.line(&line, &mut on_text)? {
-                    return acc.finish();
+                if acc.line(&line, &mut on_event)? {
+                    return acc.finish(&mut on_event);
                 }
             }
         }
         if let Some(line) = lines.rest()?
-            && acc.line(&line, &mut on_text)?
+            && acc.line(&line, &mut on_event)?
         {
-            return acc.finish();
+            return acc.finish(&mut on_event);
         }
         // Some servers close without `[DONE]`; a finish reason still marks a whole answer.
         if acc.out.finish_reason.is_some() {
-            return acc.finish();
+            return acc.finish(&mut on_event);
         }
         Err(AppError::new(
             ErrorCode::AiProtocol,
@@ -368,6 +378,8 @@ struct Accumulator {
     out: Completion,
     /// Anthropic: (content block index, tool call position) of each `tool_use` block.
     tool_blocks: Vec<(u64, usize)>,
+    /// Per tool call position: its name went out as `StreamEvent::ToolStarting`.
+    announced: Vec<bool>,
 }
 
 impl Accumulator {
@@ -375,7 +387,7 @@ impl Accumulator {
     fn line(
         &mut self,
         line: &str,
-        on_text: &mut impl FnMut(&str) -> bool,
+        on_event: &mut impl FnMut(StreamEvent<'_>) -> bool,
     ) -> Result<bool, AppError> {
         // Other SSE fields (`event:`, `id:`, `retry:`) and `:` comments carry nothing we use.
         let Some(data) = line.strip_prefix("data:") else {
@@ -403,7 +415,7 @@ impl Accumulator {
             .with_detail(msg));
         }
         if self.api == Api::Anthropic {
-            return self.anthropic_event(&v, on_text);
+            return self.anthropic_event(&v, on_event);
         }
         let Some(choice) = v
             .get("choices")
@@ -418,7 +430,7 @@ impl Accumulator {
             && !text.is_empty()
         {
             self.out.text.push_str(text);
-            if !on_text(text) {
+            if !on_event(StreamEvent::Text(text)) {
                 return Err(cancelled());
             }
         }
@@ -427,7 +439,7 @@ impl Accumulator {
             .and_then(Value::as_array)
         {
             for (pos, call) in calls.iter().enumerate() {
-                self.tool_call(pos, call)?;
+                self.tool_call(pos, call, on_event)?;
             }
         }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
@@ -438,7 +450,14 @@ impl Accumulator {
 
     /// Merges one tool call fragment. Fragments of one call share its `index`. A server that
     /// omits `index` sends each call whole with its `id`, so a new `id` starts a new call.
-    fn tool_call(&mut self, pos: usize, call: &Value) -> Result<(), AppError> {
+    /// The name is announced with the first argument fragment, since a few servers split it
+    /// over fragments before the arguments start.
+    fn tool_call(
+        &mut self,
+        pos: usize,
+        call: &Value,
+        on_event: &mut impl FnMut(StreamEvent<'_>) -> bool,
+    ) -> Result<(), AppError> {
         let id = call
             .get("id")
             .and_then(Value::as_str)
@@ -477,11 +496,33 @@ impl Accumulator {
                 slot.name = name.to_string();
             }
         }
-        if let Some(args) = func
+        let args = func
             .and_then(|f| f.get("arguments"))
             .and_then(Value::as_str)
-        {
-            slot.arguments.push_str(args);
+            .unwrap_or_default();
+        slot.arguments.push_str(args);
+        if !args.is_empty() {
+            self.announce(index, on_event)?;
+        }
+        Ok(())
+    }
+
+    /// Sends the name of the tool call at `pos` once, when it has one.
+    fn announce(
+        &mut self,
+        pos: usize,
+        on_event: &mut impl FnMut(StreamEvent<'_>) -> bool,
+    ) -> Result<(), AppError> {
+        let name = self.out.tool_calls[pos].name.as_str();
+        if name.is_empty() || self.announced.get(pos).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        if self.announced.len() <= pos {
+            self.announced.resize(pos + 1, false);
+        }
+        self.announced[pos] = true;
+        if !on_event(StreamEvent::ToolStarting(name)) {
+            return Err(cancelled());
         }
         Ok(())
     }
@@ -490,7 +531,7 @@ impl Accumulator {
     fn anthropic_event(
         &mut self,
         v: &Value,
-        on_text: &mut impl FnMut(&str) -> bool,
+        on_event: &mut impl FnMut(StreamEvent<'_>) -> bool,
     ) -> Result<bool, AppError> {
         let index = v.get("index").and_then(Value::as_u64);
         let text = match v.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -510,12 +551,15 @@ impl Accumulator {
                             format!("more than {MAX_TOOL_CALLS} tool calls"),
                         ));
                     }
-                    self.tool_blocks.push((index, calls.len()));
+                    let pos = calls.len();
+                    self.tool_blocks.push((index, pos));
                     calls.push(ToolCall {
                         id: block["id"].as_str().unwrap_or_default().to_string(),
                         name: block["name"].as_str().unwrap_or_default().to_string(),
                         arguments: String::new(),
                     });
+                    // Anthropic sends the whole name here, before any input.
+                    self.announce(pos, on_event)?;
                     None
                 } else {
                     block.get("text").and_then(Value::as_str)
@@ -558,16 +602,20 @@ impl Accumulator {
         };
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             self.out.text.push_str(text);
-            if !on_text(text) {
+            if !on_event(StreamEvent::Text(text)) {
                 return Err(cancelled());
             }
         }
         Ok(false)
     }
 
-    fn finish(self) -> Result<Completion, AppError> {
-        let mut out = self.out;
-        for (i, call) in out.tool_calls.iter_mut().enumerate() {
+    /// The whole answer. Names not yet announced (a call without argument fragments) go out
+    /// here, before the caller sees the tool calls.
+    fn finish(
+        mut self,
+        on_event: &mut impl FnMut(StreamEvent<'_>) -> bool,
+    ) -> Result<Completion, AppError> {
+        for (i, call) in self.out.tool_calls.iter_mut().enumerate() {
             if call.name.is_empty() {
                 return Err(protocol(
                     "The AI server sent a malformed tool call",
@@ -582,7 +630,10 @@ impl Accumulator {
                 call.arguments = "{}".into();
             }
         }
-        Ok(out)
+        for pos in 0..self.out.tool_calls.len() {
+            self.announce(pos, on_event)?;
+        }
+        Ok(self.out)
     }
 }
 
@@ -759,18 +810,26 @@ pub(crate) mod tests {
         json!({"model": "m", "stream": true, "messages": [{"role": "user", "content": "hi"}]})
     }
 
+    /// A stream event as text: the delta itself, or `tool_starting:<name>`.
+    fn label(e: StreamEvent<'_>) -> String {
+        match e {
+            StreamEvent::Text(d) => d.to_string(),
+            StreamEvent::ToolStarting(name) => format!("tool_starting:{name}"),
+        }
+    }
+
     async fn run(base: &str, key: Option<&str>) -> (Result<Completion, AppError>, Vec<String>) {
         let client = AiClient::new(Api::OpenAi, base, key.map(String::from))
             .unwrap()
             .with_idle_timeout(Duration::from_millis(500));
-        let mut deltas = Vec::new();
+        let mut events = Vec::new();
         let res = client
-            .chat_stream(&body(), &CancellationToken::new(), |d| {
-                deltas.push(d.to_string());
+            .chat_stream(&body(), &CancellationToken::new(), |e| {
+                events.push(label(e));
                 true
             })
             .await;
-        (res, deltas)
+        (res, events)
     }
 
     #[tokio::test]
@@ -853,10 +912,22 @@ pub(crate) mod tests {
                 {"role": "tool", "tool_call_id": "b", "content": "r2"},
             ],
         });
+        let mut events = Vec::new();
         let c = client
-            .chat_stream(&body, &CancellationToken::new(), |_| true)
+            .chat_stream(&body, &CancellationToken::new(), |e| {
+                events.push(label(e));
+                true
+            })
             .await
             .unwrap();
+        assert_eq!(
+            events,
+            [
+                "Look",
+                "tool_starting:run_read_query",
+                "tool_starting:list_tables"
+            ]
+        );
         assert_eq!(c.text, "Look");
         assert_eq!(c.finish_reason.as_deref(), Some("tool_use"));
         assert_eq!(
@@ -928,7 +999,17 @@ pub(crate) mod tests {
             done(),
         ];
         let (base, _reqs) = serve(script).await;
-        let c = run(&base, None).await.0.unwrap();
+        let (res, events) = run(&base, None).await;
+        let c = res.unwrap();
+        // Each name once, though call 0 came in three fragments.
+        assert_eq!(
+            events,
+            [
+                "Let me check. ",
+                "tool_starting:run_read_query",
+                "tool_starting:list_tables"
+            ]
+        );
         assert_eq!(c.text, "Let me check. ");
         assert_eq!(c.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(
@@ -946,6 +1027,71 @@ pub(crate) mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn tool_name_is_announced_before_the_arguments_finish() {
+        let anthropic = |v: Value| {
+            (
+                0,
+                format!("event: {}\ndata: {v}\n\n", v["type"].as_str().unwrap()),
+            )
+        };
+        let rest = |api: Api| match api {
+            Api::OpenAi => vec![
+                sse(json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "id": "call_a", "type": "function", "function": {"name": "run_read_query", "arguments": ""}}
+                ]}}]})),
+                sse(json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": "{\"sql\": "}}
+                ]}}]})),
+                (3_000, done().1),
+            ],
+            Api::Anthropic => vec![
+                anthropic(
+                    json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "run_read_query", "input": {}}}),
+                ),
+                anthropic(
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"sql\": "}}),
+                ),
+                (3_000, anthropic(json!({"type": "message_stop"})).1),
+            ],
+        };
+        for api in [Api::OpenAi, Api::Anthropic] {
+            let mut script = vec![head("200 OK", "text/event-stream")];
+            script.extend(rest(api));
+            let (base, _r) = serve(script).await;
+            let client = AiClient::new(api, &base, None).unwrap();
+            let started = std::time::Instant::now();
+            let mut events = Vec::new();
+            // Stopping at the name proves it came while the arguments were still streaming.
+            let e = client
+                .chat_stream(&body(), &CancellationToken::new(), |e| {
+                    events.push(label(e));
+                    false
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::Cancelled, "{api:?}");
+            assert_eq!(events, ["tool_starting:run_read_query"], "{api:?}");
+            assert!(started.elapsed() < Duration::from_secs(2), "{api:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_without_argument_fragments_is_announced_at_the_end() {
+        let script = vec![
+            head("200 OK", "text/event-stream"),
+            sse(json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call_a", "type": "function", "function": {"name": "list_tables", "arguments": ""}}
+            ]}}]})),
+            finish_chunk("tool_calls"),
+            done(),
+        ];
+        let (base, _r) = serve(script).await;
+        let (res, events) = run(&base, None).await;
+        assert_eq!(res.unwrap().tool_calls[0].name, "list_tables");
+        assert_eq!(events, ["tool_starting:list_tables"]);
     }
 
     #[tokio::test]

@@ -1,9 +1,29 @@
 import { version } from '../../package.json';
 import { api } from './api';
+import { releasesSince, type Release } from './changelog';
 import { tabs } from './tabs.svelte';
 import { settlePending } from './tx.svelte';
 
 export const appVersion = version;
+
+/** The last version whose changes the user saw. A different version on start means the app was updated (or is new). */
+const SEEN_KEY = 'sandb.version.seen';
+export const whatsNew = $state({ releases: [] as Release[] });
+
+/** Shows the changes since the last version that was opened; the dev server skips it. */
+export function showWhatsNew() {
+  if (import.meta.env.DEV) return;
+  const seen = localStorage.getItem(SEEN_KEY);
+  if (seen === appVersion) return;
+  whatsNew.releases = releasesSince(seen, appVersion);
+  if (!whatsNew.releases.length) localStorage.setItem(SEEN_KEY, appVersion);
+}
+
+/** Closing the dialog marks this version as seen, so it opens once per version. */
+export function closeWhatsNew() {
+  whatsNew.releases = [];
+  localStorage.setItem(SEEN_KEY, appVersion);
+}
 
 type Status = 'idle' | 'checking' | 'latest' | 'available' | 'installing' | 'restart' | 'error';
 export const updates = $state({ status: 'idle' as Status, next: '', notes: '', error: '' });

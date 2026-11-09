@@ -39,18 +39,20 @@
   type RunMenu = { sql: string; source?: Source; kind: 'read' | 'write'; count: number; x: number; y: number; anchor: HTMLElement };
   let runMenu = $state<RunMenu | null>(null);
   const menuConn = $derived(runMenu?.source ? connOf(runMenu.source) : undefined);
-  const activeReady = $derived(!!active && !active.table && !activeBusy);
   const newReady = $derived(!!runMenu?.source && !!menuConn);
+  /** The code block's database differs from the active tab's, so "Run in active tab" opens a new tab there. */
+  const activeOther = $derived(!!active && !!runMenu?.source && !!menuConn && (active.connId !== runMenu.source.connId || active.database !== dbOf(runMenu.source)));
+  const activeReady = $derived(activeOther || (!!active && !active.table && !activeBusy));
   const insertReady = $derived(!!active || newReady);
 
-  /** The database of the reply: its last data step, else the active editor, else the only chat database. */
+  /** The database of the reply: its last data step, else the only chat database, else the active editor. */
   function replySource(m: Msg): Source | undefined {
     for (let i = m.parts.length - 1; i >= 0; i--) {
       const p = m.parts[i];
       if (p.kind === 'tool' && p.source) return p.source;
     }
-    if (active) return { connId: active.connId, database: active.database };
-    return scope.length === 1 ? scope[0] : undefined;
+    if (scope.length === 1) return scope[0];
+    return active ? { connId: active.connId, database: active.database } : undefined;
   }
 
   /** Opens the small Run menu under the code block's button; picking an item runs at once. */
@@ -103,6 +105,7 @@
 
   function activeHint() {
     if (!active) return 'No query tab';
+    if (activeOther) return 'A different database · opens a new tab';
     if (active.table) return 'The active tab shows a table';
     if (activeBusy) return 'The active tab is running a query';
     const where = sourceLabel({ connId: active.connId, database: active.database });
@@ -154,11 +157,12 @@
   let composer = $state<HTMLTextAreaElement>();
 
   // The scripted demo flows talk about orders; real connections get prompts for their own tables.
+  // `write`: the prompt asks for a change, so it shows only while writes are on.
   const suggestions = $derived.by(() => {
-    const out = tables.includes('orders') ? ['Which order status brings the most revenue?', 'Delete cancelled orders older than 90 days'] : [];
-    for (const t of tables.filter((t) => t !== 'orders').slice(0, 2)) out.push(`Show the latest 20 rows of ${t}`);
-    if (tables.length) out.push('What tables are in this database, and what do they hold?');
-    return out.slice(0, 4);
+    const out: { text: string; write?: boolean }[] = tables.includes('orders') ? [{ text: 'Which order status brings the most revenue?' }, { text: 'Delete cancelled orders older than 90 days', write: true }] : [];
+    for (const t of tables.filter((t) => t !== 'orders').slice(0, 2)) out.push({ text: `Show the latest 20 rows of ${t}` });
+    if (tables.length) out.push({ text: 'What tables are in this database, and what do they hold?' });
+    return out.filter((s) => writesOn || !s.write).slice(0, 4);
   });
 
   // ---- tool steps ----
@@ -240,6 +244,20 @@
   /** Short target of a step for its one-line summary. */
   const target = (p: ToolPart) => (p.name === 'describe_table' ? p.sql : p.sql?.trim().split('\n')[0]) ?? '';
   const duration = (ms?: number) => (ms === undefined ? '' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+  /** Time from sending the question to the end of the reply; replies saved before it was kept have none. */
+  const replyMs = (m: Msg) => (m.started !== undefined && m.ended !== undefined ? m.ended - m.started : undefined);
+  /** Time the steps' tools ran; none when no step has finished. */
+  const toolMs = (steps: ToolPart[]) => (steps.some((s) => s.ms !== undefined) ? steps.reduce((n, s) => n + (s.ms ?? 0), 0) : undefined);
+  /** The last read that ran without an error; its SQL shows under a reply whose steps are hidden. */
+  function lastQuery(parts: Part[]) {
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const x = parts[i];
+      if (x.kind === 'tool' && x.name === 'run_read_query' && x.status === 'done' && x.sql) return { p: x, sql: x.sql };
+    }
+  }
+  /** What the model prepares while the arguments of a tool call still stream. */
+  const startingLabel = (name: string) =>
+    name === 'run_read_query' ? 'Writing query…' : name === 'list_tables' || name === 'describe_table' ? 'Reading schema…' : name === 'render_chart' ? 'Preparing chart…' : name === 'propose_write' ? 'Preparing change…' : `Using ${name}…`;
   /** Columns whose first non-NULL value is a number; they align right, as in the grid. */
   function numeric(rows: Row[]) {
     const out: Record<string, boolean> = {};
@@ -379,6 +397,15 @@
   const placeholder = $derived(chat.question ? 'Type your own answer…' : chat.pending ? 'Approve or deny the write above…' : ready ? (many ? 'Ask across these databases…' : 'Ask about your data…') : 'Add a database to ask about…');
 </script>
 
+<!-- SQL actions of a read: of a step, and of the "Query used" box under a reply whose steps are hidden. -->
+{#snippet sqlTools(p: ToolPart, key: string)}
+  <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Copy SQL" aria-label="Copy SQL" onclick={() => copy(`${key}:sql`, p.sql!)}>{#if copied === `${key}:sql`}<Check size={13} />{:else}<Copy size={13} />{/if}</button>
+  <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Put the SQL in the editor" aria-label="Put the SQL in the editor" onclick={() => onInsertSql(p.sql!, p.source)}><FileCode size={13} /></button>
+  {#if p.name === 'run_read_query' && p.status === 'done'}
+    <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Open in the results grid (new tab)" aria-label="Open in the results grid" onclick={() => onRunSql(p.sql!, p.source)}><Table2 size={13} /></button>
+  {/if}
+{/snippet}
+
 <section class="card absolute inset-y-2 right-2 z-30 flex max-w-[calc(100%-1rem)] flex-col overflow-hidden shadow-2xl min-[880px]:relative min-[880px]:inset-auto min-[880px]:min-w-[280px] min-[880px]:shadow-[var(--card-shadow)]" style:width="{ui.chatWidth}px">
   <header class="relative flex h-11 shrink-0 items-center gap-1 border-b border-line pr-2 pl-4">
     <span class="mr-1 text-[13px] font-semibold">{showHistory ? 'Chats' : 'Assistant'}</span>
@@ -416,8 +443,8 @@
         <p class="mt-1 text-[12.5px] leading-relaxed text-muted">The assistant can read the schema of the databases below and run read-only queries. Add more databases to ask across them. It cannot change data unless you turn on write mode.</p>
         <div class="mt-5 space-y-1.5">
           {#each suggestions as s}
-            <button class="flex w-full items-center rounded-lg border border-line px-3 py-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-ink" onclick={() => submit(s)}>
-              {s}
+            <button class="flex w-full items-center rounded-lg border border-line px-3 py-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-ink" onclick={() => submit(s.text)}>
+              {s.text}
             </button>
           {/each}
         </div>
@@ -433,12 +460,14 @@
         {@const compact = !showSteps && !!m.parts.some((x) => x.kind === 'tool')}
         {@const rk = `${session?.id}:${mi}`}
         {@const hide = compact && !revealed[rk]}
+        {@const rt = replyMs(m)}
+        {@const qt = toolMs(work)}
         <div class="space-y-2.5">
           {#if compact && work.length}
             {@const working = chat.live && m === messages.at(-1) && busy(m.parts)}
-            <button class="-ml-1 flex h-6 items-center gap-1.5 rounded px-1 text-[12px] text-faint hover:bg-hover hover:text-ink" aria-expanded={!hide} onclick={() => (revealed[rk] = !revealed[rk])} title={hide ? 'Show the steps of this reply' : 'Hide the steps of this reply'}>
+            <button class="-ml-1 flex h-6 items-center gap-1.5 rounded px-1 text-[12px] text-faint hover:bg-hover hover:text-ink" aria-expanded={!hide} onclick={() => (revealed[rk] = !revealed[rk])} title="{hide ? 'Show the steps of this reply' : 'Hide the steps of this reply'}{qt !== undefined ? ` · query ${duration(qt)}` : ''}">
               {#if working}<LoaderCircle size={12} class="animate-spin text-accent" /> Working · step {work.length}
-              {:else}<ListTree size={12} /> {work.length} {work.length === 1 ? 'step' : 'steps'}{#if work.some((s) => s.ms !== undefined)} · {duration(work.reduce((n, s) => n + (s.ms ?? 0), 0))}{/if}{/if}
+              {:else}<ListTree size={12} /> {work.length} {work.length === 1 ? 'step' : 'steps'}{#if rt !== undefined} · {duration(rt)}{:else if qt !== undefined} · {duration(qt)}{/if}{/if}
               <ChevronRight size={12} class="transition-transform {hide ? '' : 'rotate-90'}" />
             </button>
           {/if}
@@ -498,7 +527,7 @@
                   {:else}
                     <span>{b.steps.length} {b.steps.length === 1 ? 'step' : 'steps'}</span>
                   {/if}
-                  <span class="ml-auto tabular-nums">{total ? duration(total) : ''}</span>
+                  <span class="ml-auto tabular-nums" title={total ? 'Time the tools of these steps ran' : undefined}>{total ? `query ${duration(total)}` : ''}</span>
                 </div>
                 <ol>
                   {#each b.steps as { p, at }, si}
@@ -601,11 +630,7 @@
                             <span class="min-w-0 flex-1 {failed ? 'text-red-700 dark:text-red-400' : ''}">{p.note ?? ''}</span>
                             {#if sqlActions}
                               <span class="flex shrink-0 items-center">
-                                <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Copy SQL" aria-label="Copy SQL" onclick={() => copy(`${key}:sql`, p.sql!)}>{#if copied === `${key}:sql`}<Check size={13} />{:else}<Copy size={13} />{/if}</button>
-                                <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Put the SQL in the editor" aria-label="Put the SQL in the editor" onclick={() => onInsertSql(p.sql!, p.source)}><FileCode size={13} /></button>
-                                {#if p.name === 'run_read_query' && p.status === 'done'}
-                                  <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink" title="Open in the results grid (new tab)" aria-label="Open in the results grid" onclick={() => onRunSql(p.sql!, p.source)}><Table2 size={13} /></button>
-                                {/if}
+                                {@render sqlTools(p, key)}
                                 {#if p.name === 'run_read_query' && p.status !== 'blocked'}
                                   <button class="grid size-6 place-items-center rounded text-faint hover:bg-hover hover:text-ink disabled:opacity-40" title="Run again" aria-label="Run again" disabled={p.status === 'running'} onclick={() => rerun(p)}><RotateCw size={13} /></button>
                                 {/if}
@@ -644,7 +669,9 @@
           {/each}
           {#if chat.live && m === messages.at(-1)}
             <!-- Steps and questions show their own state; otherwise the reply waits for the model or streams text. -->
-            {#if m.parts.length === 0 || afterStep(m.parts)}
+            {#if chat.starting && !busy(m.parts)}
+              <div class="flex items-center gap-2 text-[12.5px] text-muted"><LoaderCircle size={13} class="animate-spin text-accent" /> {startingLabel(chat.starting)}</div>
+            {:else if m.parts.length === 0 || afterStep(m.parts)}
               <div class="flex items-center gap-2 text-[12.5px] text-muted"><LoaderCircle size={13} class="animate-spin text-accent" /> Thinking…</div>
             {:else if m.parts.at(-1)?.kind === 'text'}
               <div class="flex items-center gap-2 text-[12.5px] text-muted"><LoaderCircle size={13} class="animate-spin text-accent" /> Writing…</div>
@@ -652,6 +679,21 @@
           {:else}
             {@const text = replyText(m.parts)}
             {@const printable = !!text || m.parts.some((x) => x.kind === 'chart')}
+            {@const q = hide ? lastQuery(m.parts) : undefined}
+            {#if q}
+              {@const qc = (q.p.source && connOf(q.p.source)) || scopeConns[0]}
+              <details class="group overflow-hidden rounded-lg border border-line">
+                <summary class="flex h-7 cursor-pointer list-none items-center gap-1.5 bg-sunken px-2.5 text-[11.5px] text-faint select-none hover:text-ink [&::-webkit-details-marker]:hidden">
+                  <FileCode size={12} /> Query used
+                  {#if many && q.p.source}<span class="max-w-24 shrink-0 truncate rounded bg-surface px-1 font-mono text-[10.5px] text-muted" title={sourceLabel(q.p.source)}>{dbOf(q.p.source)}</span>{/if}
+                  <ChevronRight size={12} class="ml-auto transition-transform group-open:rotate-90" />
+                </summary>
+                <pre class="max-h-64 overflow-auto border-t border-line bg-sunken px-3 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-ink">{@html sqlHtml(q.sql, qc?.engine)}</pre>
+                <div class="flex items-center justify-end border-t border-line px-3 py-1 text-muted">
+                  <span class="flex shrink-0 items-center">{@render sqlTools(q.p, `${rk}:query`)}</span>
+                </div>
+              </details>
+            {/if}
             <div class="-ml-1 flex items-center text-faint">
               {#if text}
                 <button class="grid size-6 place-items-center rounded hover:bg-hover hover:text-ink" title="Copy reply" aria-label="Copy reply" onclick={() => copy(`${mi}:reply`, text)}>{#if copied === `${mi}:reply`}<Check size={13} />{:else}<Copy size={13} />{/if}</button>
@@ -660,6 +702,9 @@
                 <button class="flex h-6 items-center gap-1 rounded px-1.5 text-[12px] font-medium hover:bg-hover hover:text-ink disabled:opacity-40" title="Export the reply as a PDF" aria-label="Export as PDF" disabled={exporting !== null} onclick={() => exportPdf(mi)}>{#if exporting === mi}<LoaderCircle size={13} class="animate-spin" />{:else}<FileDown size={13} />{/if} Export PDF</button>
               {/if}
               <button class="grid size-6 place-items-center rounded hover:bg-hover hover:text-ink disabled:opacity-40" title="Ask again" aria-label="Ask again" disabled={!!chat.live} onclick={() => retry(mi)}><RotateCw size={13} /></button>
+              {#if !compact && work.length && rt !== undefined}
+                <span class="ml-auto pr-1 text-[11.5px] tabular-nums" title="Reply time{qt !== undefined ? ` · query ${duration(qt)}` : ''}">{duration(rt)}</span>
+              {/if}
             </div>
             {#if exported?.mi === mi}
               <p class="text-[12px] break-all {exported.ok ? 'text-muted' : 'text-red-700 dark:text-red-400'}">{exported.text}</p>
