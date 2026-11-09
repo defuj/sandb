@@ -4,6 +4,13 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-09
+
+- The editor gutter now has a fold arrow at the first line of each statement that uses more than one line, as in VS Code. It replaces the Run button. Click the arrow to fold the statement to its first line. Click it again to unfold the statement. To run a statement, use ⌘↵.
+- New fold shortcuts: ⌥⌘[ folds or unfolds the statement at the cursor. ⌃⌥[ folds all statements. ⌃⌥] unfolds all statements.
+- Fixed: the assistant could show a chat on a different database than the active tab, for example after you start the app, open a tab on a different database, or open an old chat from history. Now, when the active tab moves to a database that the open chat does not use, the assistant starts a new chat on the database of the tab. **Explain with AI** does the same check when you click it: if the chat has messages on a different database, it starts a new chat; if the chat is empty, it changes the chat database to the database of the tab. The old chat stays in history.
+- The row numbers in the results grid now stay at the left edge when you scroll to the right. They keep the color of the row: selected, new, deleted or failed.
+
 ## [0.10.0] - 2026-11-09
 
 - Production work is easier to see. When a tab uses a production connection, the app shows these signs:
