@@ -4,6 +4,8 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-09
+
 - Production work is easier to see. When a tab uses a production connection, the app shows these signs:
   - A red line under the tab in the title bar.
   - A red line at the top of the main panel, for table data, table properties and the query editor.
