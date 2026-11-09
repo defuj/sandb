@@ -4,6 +4,8 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-09
+
 - Fixed: a Run from an assistant SQL block could run the query on the database of the active tab, not on the database of the chat. If the reply has no step with a database, the block now uses the chat database when the chat has only one. If the active tab is on a different database, **Run in active tab** opens a new tab on the database of the block. The menu tells you this.
 - Fixed: **Open** and **Open and run** on a saved query did not open a new tab when the query was already open in a tab. They selected that tab again. Now they always open a new tab. They use the active tab only if it is empty and on the same database.
 - Fixed: **Run in active tab** and **Insert into editor** on an assistant SQL block added the query below the current text without a `;`. When you ran all of the editor, the two queries ran as one statement and failed with `syntax error at or near "SELECT"`. Now the app adds `;` after the last statement first.
