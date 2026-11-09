@@ -4,6 +4,19 @@ All notable changes to sandb. Versions follow [Semantic Versioning](https://semv
 
 ## [Unreleased]
 
+- Production work is easier to see. When a tab uses a production connection, the app shows these signs:
+  - A red line under the tab in the title bar.
+  - A red line at the top of the main panel, for table data, table properties and the query editor.
+  - A **production** tag in the table header, before the connection name.
+  - A red line along the tree under a production connection, from its databases down to its tables.
+- Fixed: in the editor right-click menu, **Run statement at cursor** used two lines. The menu is now wider.
+- New: **Export SQL** in the results footer, next to **Export CSV**. It writes all rows of the current SELECT as `INSERT` statements, with no row limit. Use the file to copy rows to a different environment, for example from dev to staging. The export needs the desktop app and a SELECT. Before you choose the file, a dialog lets you set these options:
+  - The target schema and table. The query table is the default. Clear the schema to omit it.
+  - The columns to export.
+  - What to do when the row is already in the target: fail, skip the row, or update it (upsert on the key columns you choose; the primary key is the default).
+  - The number of rows in each `INSERT` statement.
+  - A transaction (`BEGIN` … `COMMIT`) around the file, and the header comment.
+
 ## [0.9.0] - 2026-11-09
 
 - Fixed: a Run from an assistant SQL block could run the query on the database of the active tab, not on the database of the chat. If the reply has no step with a database, the block now uses the chat database when the chat has only one. If the active tab is on a different database, **Run in active tab** opens a new tab on the database of the block. The menu tells you this.

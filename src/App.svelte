@@ -2,7 +2,7 @@
   import { Database, Search, Settings, ScrollText, Sun, Moon, Plus, Sparkles, PanelRight, PanelLeft, CircleArrowUp, PanelBottom } from '@lucide/svelte';
   import { FileCode, Play, Square, X, LoaderCircle, Check, Undo2, ListOrdered, FileUp, Scissors, Copy, ClipboardPaste, ChevronUp, ChevronDown, Table2, Eye, ScanEye, RotateCw, Save, CopyPlus } from '@lucide/svelte';
   import { tick, untrack } from 'svelte';
-  import { ui, db, active, type Conn } from './lib/state.svelte';
+  import { ui, db, active, envTag, type Conn } from './lib/state.svelte';
   import { look, backdropOn, toggleTheme } from './lib/appearance.svelte';
   import { connOf, dbOf, type Source as ChatSource } from './lib/chat.svelte';
   import { api, ApiError, type ResultSort, type ForeignKeyInfo, type SnapshotTable } from './lib/api';
@@ -418,8 +418,8 @@
     e.preventDefault();
     e.stopPropagation();
     editor?.pointAt(e.clientX, e.clientY);
-    // Menu is w-56 (224px) and about 310px tall; keep it inside the window.
-    editorMenu = { x: Math.max(4, Math.min(e.clientX, innerWidth - 228)), y: Math.max(4, Math.min(e.clientY, innerHeight - 314)), sel: !!editor?.selection() };
+    // Menu is w-64 (256px) and about 310px tall; keep it inside the window.
+    editorMenu = { x: Math.max(4, Math.min(e.clientX, innerWidth - 260)), y: Math.max(4, Math.min(e.clientY, innerHeight - 314)), sel: !!editor?.selection() };
   }
 
   // The action runs first: the menu's `{@const}` reads `editorMenu`, which is null once closed.
@@ -860,14 +860,17 @@
         {#each tabs.list as t (t.id)}
           {@const on = t.id === tab.id && ui.page === 'query'}
           {@const dirtyT = isDirty(t)}
-          <div class="group flex h-7 shrink-0 items-center rounded-md text-[12.5px] {on ? 'tab-on font-medium text-ink' : 'text-muted hover:bg-hover hover:text-ink'}">
+          {@const prodT = db.connections.find((c) => c.id === t.connId)?.env === 'production'}
+          <!-- Production tabs carry a red underline, so the cue shows before the tab is opened. -->
+          <div class="group relative flex h-7 shrink-0 items-center rounded-md text-[12.5px] {on ? 'tab-on font-medium text-ink' : 'text-muted hover:bg-hover hover:text-ink'}">
+            {#if prodT}<span class="pointer-events-none absolute inset-x-1.5 bottom-0 h-0.5 rounded-full bg-red-600 dark:bg-red-500" aria-hidden="true"></span>{/if}
             {#if renaming === t.id}
               <span class="flex items-center gap-2 pl-2.5"><FileCode size={13} class="text-faint" />
                 <input class="w-28 bg-transparent outline-none" value={t.title} aria-label="Tab name" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" use:focusSelect onblur={(e) => rename(t, e.currentTarget.value)} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') renaming = null; }} />
               </span>
             {:else}
-              <button class="flex h-full items-center gap-2 pl-2.5" aria-current={t.id === tab.id ? 'page' : undefined} onclick={() => pickTab(t.id)} ondblclick={() => (renaming = t.id)} title="Double-click to rename">
-                {#if t.table}<Table2 size={13} class={on ? 'text-accent' : 'text-faint'} />{:else}<FileCode size={13} class={on ? 'text-accent' : 'text-faint'} />{/if} <span class="max-w-40 truncate">{t.title}</span>
+              <button class="flex h-full items-center gap-2 pl-2.5" aria-current={t.id === tab.id ? 'page' : undefined} onclick={() => pickTab(t.id)} ondblclick={() => (renaming = t.id)} title="{prodT ? 'Production · ' : ''}Double-click to rename">
+                {#if t.table}<Table2 size={13} class={on ? 'text-accent' : 'text-faint'} />{:else}<FileCode size={13} class={on ? 'text-accent' : 'text-faint'} />{/if} <span class="max-w-40 truncate">{t.title}</span>{#if prodT}<span class="sr-only">, production</span>{/if}
                 {#if running[t.id] && !on}<LoaderCircle size={12} class="animate-spin text-faint" />{/if}
                 {#if t.status?.pending}<span class="size-1.5 rounded-full bg-amber-500" title="Transaction open"></span>{/if}
               </button>
@@ -928,6 +931,8 @@
 
   <!-- Main -->
   <main bind:this={mainEl} class="card relative flex min-w-[300px] flex-1 flex-col overflow-hidden">
+    <!-- Production work gets a red top edge on every view of the tab: table data, properties and the editor. -->
+    {#if ui.page === 'query' && db.connections.length && conn.env === 'production'}<div class="pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 bg-red-600 dark:bg-red-500" aria-hidden="true"></div>{/if}
     {#if ui.page === 'settings'}
       <SettingsPage onEnableWrites={(c) => (guardTarget = c)} />
     {:else if ui.page === 'audit'}
@@ -946,6 +951,7 @@
     <div class="flex h-11 shrink-0 items-center gap-2 px-3">
       {#if t.kind === 'view'}<Eye size={14} class="shrink-0 text-accent" />{:else if t.kind === 'matview'}<ScanEye size={14} class="shrink-0 text-accent" />{:else}<Table2 size={14} class="shrink-0 text-accent" />{/if}
       <span class="min-w-0 truncate text-[13px] font-semibold" title={displayName(t)}>{displayName(t)}</span>
+      {#if conn.env === 'production'}<span class="tag shrink-0 {envTag.production}">production</span>{/if}
       <span class="hidden min-w-0 truncate text-[12px] text-faint md:inline">{conn.name} / {database}</span>
       <div class="seg ml-2 shrink-0" role="tablist" aria-label="Table view">
         <button class="seg-item {tab.view === 'data' ? 'seg-on' : ''}" role="tab" aria-selected={tab.view === 'data'} onclick={() => (tab.view = 'data')}>Data</button>
@@ -1096,7 +1102,7 @@
 <svelte:window onclick={() => (editorMenu = null)} oncontextmenu={(e) => { editorMenu = null; blockNativeMenu(e); }} onkeydown={(e) => { if (e.key === 'Escape') editorMenu = null; }} />
 {#if editorMenu}
   {@const m = editorMenu}
-  <div class="popover fixed z-40 w-56 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+  <div class="popover fixed z-40 w-64 p-1" style="left:{m.x}px;top:{m.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => run(undefined, { sql: m.sel ? editor!.selection() : editor!.statementAt() }))}><Play size={13} /> <span class="flex-1">{m.sel ? 'Run selection' : 'Run statement at cursor'}</span><kbd class="kbd">⌘↵</kbd></button>
     <button class="nav-item" role="menuitem" disabled={!!busy || kind === 'empty'} onclick={() => menuAct(() => run(undefined, { sql: tab.query }))}><ListOrdered size={13} /> <span class="flex-1">Run all statements</span><kbd class="kbd">⌥X</kbd></button>
     <button class="nav-item" role="menuitem" disabled={!!busy} onclick={() => menuAct(() => scriptInput?.click())}><FileUp size={13} /> Run SQL script from file…</button>

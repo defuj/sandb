@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
 use sqlx::mysql::MySqlRow;
+use sqlx::postgres::PgRow;
 use sqlx::{Decode, MySql, MySqlPool, PgPool, Row, Sqlite, SqlitePool, TypeInfo, ValueRef};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -109,12 +110,12 @@ struct Target {
 // Literals and identifiers (pure, unit tested)
 
 /// `"name"` (SQLite, standard SQL): inner `"` doubled.
-fn quote_dq(name: &str) -> String {
+pub(crate) fn quote_dq(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// `` `name` `` (MySQL): inner backticks doubled.
-fn quote_bt(name: &str) -> String {
+pub(crate) fn quote_bt(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
@@ -276,7 +277,7 @@ fn format_utc(secs: u64) -> String {
     )
 }
 
-fn header(conn: &Connection, table: &str) -> String {
+pub(crate) fn header(conn: &Connection, table: &str) -> String {
     let engine = if conn.version.is_empty() {
         match conn.engine {
             Engine::Pg => "PostgreSQL",
@@ -300,27 +301,37 @@ fn header(conn: &Connection, table: &str) -> String {
     )
 }
 
-/// INSERT statements of up to `BATCH` rows each, written as rows arrive.
-struct Inserts<'a, W> {
+/// INSERT statements of up to `batch` rows each, written as rows arrive.
+pub(crate) struct Inserts<'a, W> {
     out: &'a mut W,
     head: String,
+    /// Written after the rows of each statement, before its `;` (an `ON CONFLICT …` clause).
+    tail: String,
+    batch: usize,
     in_batch: usize,
     rows: u64,
 }
 
 impl<'a, W: AsyncWrite + Unpin> Inserts<'a, W> {
     /// `head`: `INSERT INTO t (a, b) VALUES`.
-    fn new(out: &'a mut W, head: String) -> Self {
+    pub(crate) fn new(out: &'a mut W, head: String) -> Self {
+        Self::with(out, head, String::new(), BATCH)
+    }
+
+    /// `batch` is at least 1.
+    pub(crate) fn with(out: &'a mut W, head: String, tail: String, batch: usize) -> Self {
         Self {
             out,
             head,
+            tail,
+            batch: batch.max(1),
             in_batch: 0,
             rows: 0,
         }
     }
 
     /// `tuple`: `(v1, v2)`.
-    async fn row(&mut self, tuple: &str) -> Result<(), AppError> {
+    pub(crate) async fn row(&mut self, tuple: &str) -> Result<(), AppError> {
         if self.in_batch == 0 {
             self.out.write_all(self.head.as_bytes()).await?;
             self.out.write_all(b"\n").await?;
@@ -330,16 +341,22 @@ impl<'a, W: AsyncWrite + Unpin> Inserts<'a, W> {
         self.out.write_all(tuple.as_bytes()).await?;
         self.in_batch += 1;
         self.rows += 1;
-        if self.in_batch == BATCH {
-            self.out.write_all(b";\n").await?;
-            self.in_batch = 0;
+        if self.in_batch == self.batch {
+            self.end().await?;
         }
         Ok(())
     }
 
-    async fn finish(self) -> Result<u64, AppError> {
+    async fn end(&mut self) -> Result<(), AppError> {
+        self.out.write_all(self.tail.as_bytes()).await?;
+        self.out.write_all(b";\n").await?;
+        self.in_batch = 0;
+        Ok(())
+    }
+
+    pub(crate) async fn finish(mut self) -> Result<u64, AppError> {
         if self.in_batch > 0 {
-            self.out.write_all(b";\n").await?;
+            self.end().await?;
         }
         Ok(self.rows)
     }
@@ -621,6 +638,21 @@ async fn pg_export<W: AsyncWrite + Unpin>(
     ins.finish().await
 }
 
+/// One cell of a `raw_sql` row as a literal. The simple query protocol sends every value as
+/// its text, which a quoted literal gives back to the column type.
+pub(crate) fn push_pg_cell(buf: &mut String, row: &PgRow, i: usize) -> Result<(), AppError> {
+    let v = row.try_get_raw(i)?;
+    if v.is_null() {
+        push_pg_value(buf, None);
+        return Ok(());
+    }
+    let s = v
+        .as_str()
+        .map_err(|e| AppError::internal("Could not read a value").with_detail(e.to_string()))?;
+    push_pg_value(buf, Some(s));
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // MySQL / MariaDB
 
@@ -714,21 +746,26 @@ async fn mysql_export<W: AsyncWrite + Unpin>(
             if i > 0 {
                 buf.push_str(", ");
             }
-            let v = row.try_get_raw(i)?;
-            if v.is_null() {
-                buf.push_str("NULL");
-                continue;
-            }
-            let ty = v.type_info().name().to_string();
-            let raw = <&[u8] as Decode<MySql>>::decode(v).map_err(|e| {
-                AppError::internal("Could not read a value").with_detail(e.to_string())
-            })?;
-            push_mysql_value(&mut buf, &ty, raw);
+            push_mysql_cell(&mut buf, &row, i)?;
         }
         buf.push(')');
         ins.row(&buf).await?;
     }
     ins.finish().await
+}
+
+/// One cell of a text-protocol MySQL row as a literal.
+pub(crate) fn push_mysql_cell(buf: &mut String, row: &MySqlRow, i: usize) -> Result<(), AppError> {
+    let v = row.try_get_raw(i)?;
+    if v.is_null() {
+        buf.push_str("NULL");
+        return Ok(());
+    }
+    let ty = v.type_info().name().to_string();
+    let raw = <&[u8] as Decode<MySql>>::decode(v)
+        .map_err(|e| AppError::internal("Could not read a value").with_detail(e.to_string()))?;
+    push_mysql_value(buf, &ty, raw);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -806,7 +843,7 @@ async fn sqlite_export<W: AsyncWrite + Unpin>(
     ins.finish().await
 }
 
-fn push_sqlite_cell(
+pub(crate) fn push_sqlite_cell(
     buf: &mut String,
     row: &sqlx::sqlite::SqliteRow,
     i: usize,

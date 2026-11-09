@@ -182,6 +182,7 @@ pub fn run() {
             commands::close_tab_session,
             commands::quit_app,
             commands::export_csv,
+            commands::export_result_sql,
             commands::save_pdf,
             commands::guard_check,
             commands::classify_write,

@@ -109,6 +109,7 @@ export const httpBackend: Backend = {
   chatSend,
   chatCancel: (chatId) => call('chat_cancel', { chatId }),
   exportCsv: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' })),
+  exportResultSql: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' })),
   tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
   exportTableSql: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' })),
   savePdf: () => Promise.reject(new ApiError({ code: 'invalid_input', message: 'Saving a PDF to a file needs the desktop app' })),

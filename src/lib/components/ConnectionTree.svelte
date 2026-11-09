@@ -150,6 +150,8 @@
   const guide = (level: number) => pad0 + level * 12 + 5.5;
   /** One 1px vertical guide per open ancestor level, like VS Code's tree. */
   const guides = (levels: number[]) => levels.map((l) => `linear-gradient(var(--c-hover),var(--c-hover)) ${guide(l)}px 0/1px 100% no-repeat`).join(',');
+  /** The connection's own guide: a red 2px rail on production, so every row under it shows where it lives. */
+  const rootGuide = (c: Conn) => (c.env === 'production' ? `linear-gradient(#dc2626b3,#dc2626b3) ${guide(0) - 0.5}px 0/2px 100% no-repeat` : guides([0]));
 
   // ---- real backends: lazy introspection ----
   const isMock = api.kind === 'mock';
@@ -462,7 +464,7 @@
     </button>
   </div>
   {#if open[c.id] && !isMock}
-    <div class="relative" style="background:{guides([0])}">
+    <div class="relative" style="background:{rootGuide(c)}">
       {@render status(c.id, 1)}
       {#each strings(c.id) as d (d)}
         {@const dk = `${c.id}/${d}`}
@@ -507,7 +509,7 @@
   {:else if open[c.id]}
     {@const dk = `${c.id}/db`}
     {@const gs = groups(c)}
-    <div class="relative" style="background:{guides([0])}">
+    <div class="relative" style="background:{rootGuide(c)}">
       <button class="nav-item" style={pad(1)} title={c.database} aria-expanded={!!open[dk]} onclick={() => toggle(dk)}>
         <ChevronRight size={12} class="shrink-0 text-faint transition-transform {open[dk] ? 'rotate-90' : ''}" />
         <Database size={13} class="shrink-0 text-faint" />

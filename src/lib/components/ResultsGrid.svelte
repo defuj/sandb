@@ -1,13 +1,15 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Download, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, Check, X, Pencil, Plus, Minus, Eye, Undo2, CircleSlash, LoaderCircle, CircleAlert, CircleCheck } from '@lucide/svelte';
+  import { Download, FileCode, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, Check, X, Pencil, Plus, Minus, Eye, Undo2, CircleSlash, LoaderCircle, CircleAlert, CircleCheck } from '@lucide/svelte';
   import { pkOf, tableData, type QueryResult, type Cell, type Row, type Schema } from '../mock';
   import { canWrite, type Conn } from '../state.svelte';
   import { activeTab } from '../tabs.svelte';
   import { edits, editBlocker, prepareEdit, pendingCount, resetEdits, setCell, addRow, parseInput, buildStatements, saveEdits } from '../edits.svelte';
   import EditSaveDialog from './EditSaveDialog.svelte';
-  import { api, ApiError, type ForeignKeyInfo, type ResultSort } from '../api';
+  import ExportSqlDialog from './ExportSqlDialog.svelte';
+  import { api, ApiError, type ForeignKeyInfo, type ResultSort, type SqlExportOptions } from '../api';
   import { csvCell, formatCell, isBytes } from '../results';
+  import { relationsIn } from '../sql/columns';
 
   /** `foreignKeys` + `onfollow`: a table Data view; cells of a foreign key column get a link to the referenced row. */
   let {
@@ -130,6 +132,7 @@
   $effect(() => {
     result;
     exportMsg = null;
+    sqlExport = null;
   });
 
   // The desktop app streams every row of a single read to a file it asks for; otherwise the loaded rows export in the browser.
@@ -150,6 +153,38 @@
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), download: 'result.csv' });
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  // INSERT statements for every row of the read, to copy rows to another environment. The dialog starts from the table the
+  // query reads (the edit target when known) and its primary key as the upsert key.
+  let sqlExport = $state<{ r: QueryResult; schema: string | null; table: string; key: number[] } | null>(null);
+  async function exportSql() {
+    if (!result) return;
+    const r = result;
+    if (api.kind !== 'tauri') {
+      exportMsg = { ok: false, text: 'SQL export to a file needs the desktop app' };
+      return;
+    }
+    if (!r.live || !r.sql || !r.isRead || r.summary) {
+      exportMsg = { ok: false, text: 'SQL export needs the result of one SELECT' };
+      return;
+    }
+    // A result that cannot be edited has no primary key to offer; the export still works.
+    await prepareEdit(r, conn);
+    if (result !== r) return;
+    const rels = r.edit?.table ? [[...(r.edit.schema ? [r.edit.schema] : []), r.edit.table]] : relationsIn(r.sql, conn.engine).map((x) => x.path);
+    // `db.schema.table` keeps the last two parts; with no single table the user names it.
+    const path = rels.length === 1 ? rels[0].slice(-2) : [''];
+    const key = (r.edit?.pk ?? []).map((k) => r.columns.indexOf(k)).filter((i) => i >= 0);
+    sqlExport = { r, schema: path.length === 2 ? path[0] : null, table: path[path.length - 1], key };
+  }
+
+  /** Throws so the dialog stays open with the error; closes on success. A closed save dialog keeps it open. */
+  async function runSqlExport(r: QueryResult, schema: string | null, table: string, options: SqlExportOptions) {
+    const out = await api.exportResultSql(conn.id, r.database ?? conn.database, r.sql!, schema, table, options, activeTab()?.id);
+    if (out.cancelled) return;
+    sqlExport = null;
+    exportMsg = { ok: true, text: `Exported ${out.rows} rows to ${out.path}` };
   }
 
   // ---- edit mode ----
@@ -588,7 +623,8 @@
       {#if exportMsg}
         <span class="min-w-0 truncate text-[12px] {exportMsg.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}" title={exportMsg.text}>{exportMsg.text}</span>
       {/if}
-      <button class="btn btn-ghost ml-auto h-7 px-2 text-[12px]" title="Export CSV" onclick={exportCsv}><Download size={13} /><span class="hidden @[36rem]:inline">Export CSV</span></button>
+      <button class="btn btn-ghost ml-auto h-7 px-2 text-[12px]" title="Export as SQL INSERT statements" onclick={exportSql}><FileCode size={13} /><span class="hidden @[36rem]:inline">Export SQL</span></button>
+      <button class="btn btn-ghost h-7 px-2 text-[12px]" title="Export CSV" onclick={exportCsv}><Download size={13} /><span class="hidden @[36rem]:inline">Export CSV</span></button>
     </footer>
   </div>
 {/if}
@@ -622,3 +658,7 @@
 {/snippet}
 
 <EditSaveDialog bind:mode={dialog} {stmts} {conn} onsave={doSave} />
+{#if sqlExport}
+  {@const x = sqlExport}
+  <ExportSqlDialog columns={x.r.columns} types={x.r.types} engine={conn.engine} schema={x.schema} table={x.table} key={x.key} onexport={(s, t, o) => runSqlExport(x.r, s, t, o)} onclose={() => (sqlExport = null)} />
+{/if}

@@ -1,5 +1,20 @@
 // Mirrors the Rust serde types in src-tauri/src/core (camelCase fields, lowercase enums).
 
+/** What a row already in the target does to its INSERT: fail, skip the row, or update it. */
+export type InsertMode = 'insert' | 'skip' | 'upsert';
+
+/** Column numbers are positions in the result. */
+export interface SqlExportOptions {
+  /** Columns to write, in this order; null writes all. */
+  columns: number[] | null;
+  mode: InsertMode;
+  /** Conflict key of an upsert. Required on PG and SQLite; MySQL only leaves these columns out of the update. */
+  key: number[];
+  rowsPerStatement: number;
+  transaction: boolean;
+  header: boolean;
+}
+
 export type Engine = 'pg' | 'mysql' | 'sqlite';
 export type Env = 'production' | 'staging' | 'local';
 export type SslMode = 'disable' | 'prefer' | 'require';
@@ -459,6 +474,8 @@ export interface Backend {
   quitApp(): Promise<void>;
   /** Tauri only: asks for a file in a native save dialog and streams the full result of one read to it. Other transports export in the browser. `tabId` reads inside the tab's open transaction, as `runQuery` does. */
   exportCsv(connId: string, database: string, sql: string, tabId?: string): Promise<ExportResult>;
+  /** Tauri only: as `exportCsv`, but writes INSERT statements into `table` (in `schema`, the PG schema or MySQL database, when not null), for copying the rows to another environment. */
+  exportResultSql(connId: string, database: string, sql: string, schema: string | null, table: string, options: SqlExportOptions, tabId?: string): Promise<ExportResult>;
   /** `CREATE` statement(s) of one table or view: the table, then its indexes (and triggers on SQLite). */
   tableDdl(connId: string, database: string, schema: string | null, table: string): Promise<string>;
   /** Tauri only: asks for a file in a native save dialog and writes the table's DDL to it; with `data`, INSERT statements for every row follow. */

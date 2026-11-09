@@ -509,7 +509,7 @@ async fn dispatch(
             Err(e) => reply::<()>(Err(e)),
         },
         "chat_cancel" => reply(args::<ChatCancelArgs>(body).map(|a| chat::cancel(st, &a.chat_id))),
-        // No export_csv, export_table_sql or save_pdf: the bridge never writes files on request;
+        // No export_csv, export_result_sql, export_table_sql or save_pdf: the bridge never writes files on request;
         // the browser UI downloads the file client-side instead.
         _ => reply::<()>(Err(AppError::not_found(format!(
             "Unknown command {command}"

@@ -11,7 +11,7 @@ use crate::core::db::dump::{self, TableExportRequest};
 use crate::core::db::edit::{
     self, ApplyEditsRequest, ApplyEditsResult, CellValueRequest, EditableRequest, EditableResult,
 };
-use crate::core::db::export::{self, ExportRequest, ExportResult};
+use crate::core::db::export::{self, ExportRequest, ExportResult, SqlExportRequest};
 use crate::core::db::introspect::{self, ColumnInfo, SchemaSnapshot, TableInfo, TableProperties};
 use crate::core::db::query::{self, QueryProgress, QueryRun, RunRequest};
 use crate::core::db::readonly::{self, AiReadResult, ReadLimits};
@@ -330,6 +330,37 @@ pub async fn export_csv(
         .into_path()
         .map_err(|e| AppError::invalid("Choose a file to export to").with_detail(e.to_string()))?;
     export::export_csv(&state, request, &path).await
+}
+
+/// The full result of one read as INSERT statements into `request.table`, for copying rows to
+/// another environment. The file comes from a native save dialog, as for `export_csv`.
+#[tauri::command]
+pub async fn export_result_sql(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SqlExportRequest,
+) -> Res<ExportResult> {
+    export::check_sql(&state, &request)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(format!("{}.sql", request.table))
+        .add_filter("SQL", &["sql"])
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let picked = rx.await.ok().flatten();
+    let Some(path) = picked else {
+        return Ok(ExportResult {
+            cancelled: true,
+            rows: 0,
+            path: String::new(),
+        });
+    };
+    let path = path
+        .into_path()
+        .map_err(|e| AppError::invalid("Choose a file to export to").with_detail(e.to_string()))?;
+    export::export_sql(&state, request, &path).await
 }
 
 /// One table as a `.sql` file: its DDL, plus INSERT statements when `request.data`. The file

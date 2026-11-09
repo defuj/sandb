@@ -49,6 +49,7 @@ export const tauriBackend: Backend = {
   closeTabSession: (tabId) => call('close_tab_session', { tabId }),
   quitApp: () => call('quit_app'),
   exportCsv: (connId, database, sql, tabId) => call('export_csv', { request: { connId, database, sql, tabId } }),
+  exportResultSql: (connId, database, sql, schema, table, options, tabId) => call('export_result_sql', { request: { connId, database, sql, tabId, schema, table, options } }),
   tableDdl: (connId, database, schema, table) => call('table_ddl', { connId, database, schema, table }),
   exportTableSql: (connId, database, schema, table, data) => call('export_table_sql', { request: { connId, database, schema, table, data } }),
   savePdf: (name, pdf) => call('save_pdf', pdf, { 'x-file-name': name }),

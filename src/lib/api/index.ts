@@ -32,6 +32,7 @@ function bridgeBackend(): Backend {
     closeTabSession: (tabId) => load.then((b) => b.closeTabSession(tabId)),
     quitApp: () => load.then((b) => b.quitApp()),
     exportCsv: (connId, database, sql, tabId) => load.then((b) => b.exportCsv(connId, database, sql, tabId)),
+    exportResultSql: (connId, database, sql, schema, table, options, tabId) => load.then((b) => b.exportResultSql(connId, database, sql, schema, table, options, tabId)),
     tableDdl: (connId, database, schema, table) => load.then((b) => b.tableDdl(connId, database, schema, table)),
     exportTableSql: (connId, database, schema, table, data) => load.then((b) => b.exportTableSql(connId, database, schema, table, data)),
     savePdf: (name, pdf) => load.then((b) => b.savePdf(name, pdf)),

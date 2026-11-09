@@ -341,6 +341,9 @@ export const mockBackend: Backend = {
   async exportCsv(_connId, _database, _sql, _tabId) {
     throw new ApiError({ code: 'invalid_input', message: 'CSV export to a file needs the desktop app' });
   },
+  async exportResultSql() {
+    throw new ApiError({ code: 'invalid_input', message: 'SQL export to a file needs the desktop app' });
+  },
   // The prototype data has types and primary keys only, so the DDL has no defaults or other constraints.
   async tableDdl(connId, _database, schema, table) {
     const c = find(connId);
